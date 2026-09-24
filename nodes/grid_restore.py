@@ -59,7 +59,12 @@ import torch
 
 from comfy_api.latest import io
 
-from ._image_utils import _torch_image_to_uint8_rgb, _uint8_rgb_to_torch_image
+from ._image_utils import (
+    _join_rgb_alpha,
+    _split_rgb_alpha,
+    _torch_image_to_uint8_bhwc,
+    _uint8_rgb_to_torch_image,
+)
 
 __all__ = ["PixelGridRestore"]
 
@@ -84,8 +89,27 @@ _BACKEND_MODULE = {
 _INSTALL_HINT = 'pip install "perfect-pixel[opencv]"'
 
 
+# The upstream *steps* we drive ourselves instead of calling get_perfect_pixel().
+#
+# Why not get_perfect_pixel: it returns ``(w, h, image)`` and nothing else, so
+# the grid line coordinates it computed internally are unrecoverable. We need
+# them, because Qwen-Image-2.1's VAE emits RGBA and the alpha channel has to be
+# resampled onto *exactly* the same grid as the colour channels -- resampling it
+# separately (even with the same cell count) would let the two drift apart.
+#
+# These are upstream internals rather than a public API, so their absence is
+# reported clearly instead of failing with an AttributeError deep in the call.
+_REQUIRED_UPSTREAM_OPS = (
+    "detect_grid_scale",
+    "refine_grids",
+    "sample_majority",
+    "sample_median",
+    "sample_center",
+)
+
+
 def _import_backend(backend: str):
-    """Return the upstream ``get_perfect_pixel`` for the requested backend."""
+    """Import the upstream module for ``backend`` and verify the steps we call."""
     if backend not in _BACKEND_MODULE:
         raise ValueError(
             f"PixelGridRestore: unknown backend {backend!r}; expected one of {BACKEND_OPTIONS}."
@@ -98,11 +122,20 @@ def _import_backend(backend: str):
             f"PixelGridRestore: 无法导入后端 {backend!r} ({module_name})。"
             f" 请先安装依赖: {_INSTALL_HINT}"
         ) from exc
-    return module.get_perfect_pixel
+
+    missing = [name for name in _REQUIRED_UPSTREAM_OPS if not hasattr(module, name)]
+    if missing:
+        raise RuntimeError(
+            f"PixelGridRestore: 后端 {backend!r} ({module_name}) 缺少本节点需要的上游函数 "
+            f"{missing}。本包直接驱动 perfect-pixel 的检测/精修/采样步骤（因为需要拿到网格坐标"
+            f"才能让 alpha 与 RGB 严格对齐），因此依赖这些符号。多半是 perfect-pixel 升级后改名了；"
+            f"请检查已安装版本，或改用另一个 backend。"
+        )
+    return module
 
 
 def _resolve_backend(backend: str):
-    """Resolve ``Auto`` to a concrete backend and return ``(label, fn)``."""
+    """Resolve ``Auto`` to a concrete backend and return ``(label, module)``."""
     if backend == "Auto":
         try:
             import cv2  # noqa: F401
@@ -242,6 +275,103 @@ def _grid_confidence(rgb: np.ndarray, grid_w: int, grid_h: int) -> float:
     return float(min(1.0, max(0.0, (raw - 3.0) / 12.0)))
 
 
+def _fix_square_pair(
+    rgb: np.ndarray,
+    alpha: np.ndarray | None,
+    refined_w: int,
+    refined_h: int,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Upstream's ``fix_square``, applied identically to colour and to alpha.
+
+    A verbatim port of ``perfect_pixel.py:413-428``: when the *refined* grid
+    misses a square by exactly one cell, drop or duplicate one row/column. The
+    parity branch is upstream's, not ours -- it chooses whichever fix leaves an
+    even number of cells.
+
+    Callers must only invoke this when ``abs(refined_w - refined_h) == 1``, which
+    is upstream's own guard; the equal-size case would otherwise fall into the
+    ``else`` branch and silently drop a row.
+
+    ``alpha`` may be ``None`` (RGB input), in which case only ``rgb`` moves.
+    """
+    if refined_w > refined_h:
+        if refined_w % 2 == 1:
+            transform = lambda a: a[:, :-1]  # drop one column
+        else:
+            transform = lambda a: np.concatenate([a[:1, :], a], axis=0)  # dup first row
+    else:
+        if refined_h % 2 == 1:
+            transform = lambda a: a[:-1, :]  # drop one row
+        else:
+            transform = lambda a: np.concatenate([a[:, :1], a], axis=1)  # dup first col
+
+    rgb = transform(rgb)
+    alpha = None if alpha is None else transform(alpha)
+    return rgb, alpha
+
+
+def _pixelate(
+    module,
+    rgb: np.ndarray,
+    alpha: np.ndarray | None,
+    sample_method: str,
+    grid_size: tuple[int, int] | None,
+    min_size: float,
+    peak_width: int,
+    refine_intensity: float,
+    fix_square: bool,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Drive upstream's detection / refinement / sampling, keeping alpha aligned.
+
+    This mirrors ``perfect_pixel.get_perfect_pixel`` (``perfect_pixel.py:384-429``)
+    step for step -- same ``detect_grid_scale`` arguments including the hardcoded
+    ``max_ratio=1.5``, same ``refine_grids``, same sampler, same ``fix_square``.
+    It was checked to reproduce ``get_perfect_pixel`` byte-for-byte on a
+    synthetic grid, and ``_selftest.py`` re-checks it against the real baseline.
+
+    The one deliberate difference is that the grid coordinates are reused for
+    alpha instead of being recomputed, which is the entire reason for not just
+    calling ``get_perfect_pixel``: it never hands back those coordinates.
+
+    Returns ``(rgb_out, alpha_out)``, or ``(None, None)`` on detection failure --
+    upstream's own convention, preserved so the caller's error path is unchanged.
+    """
+    if grid_size is not None:
+        scale_col, scale_row = grid_size
+    else:
+        scale_col, scale_row = module.detect_grid_scale(
+            rgb, peak_width=peak_width, max_ratio=1.5, min_size=min_size
+        )
+        if scale_col is None or scale_row is None:
+            return None, None
+
+    size_x = int(round(scale_col))
+    size_y = int(round(scale_row))
+    x_coords, y_coords = module.refine_grids(rgb, size_x, size_y, refine_intensity)
+
+    refined_w = len(x_coords) - 1
+    refined_h = len(y_coords) - 1
+
+    sampler = {
+        "majority": module.sample_majority,
+        "median": module.sample_median,
+        "center": module.sample_center,
+    }[sample_method]
+
+    rgb_out = sampler(rgb, x_coords, y_coords)
+
+    alpha_out = None
+    if alpha is not None:
+        # Replicated to 3 channels so the identical sampler can be reused; the
+        # three copies are equal, so whichever one it picks back is alpha.
+        alpha_out = sampler(np.repeat(alpha, 3, axis=2), x_coords, y_coords)[..., :1]
+
+    if fix_square and abs(refined_w - refined_h) == 1:
+        rgb_out, alpha_out = _fix_square_pair(rgb_out, alpha_out, refined_w, refined_h)
+
+    return rgb_out, alpha_out
+
+
 class PixelGridRestore(io.ComfyNode):
     """Detect / force a pixel grid and resample one colour per cell."""
 
@@ -260,7 +390,11 @@ class PixelGridRestore(io.ComfyNode):
             inputs=[
                 io.Image.Input(
                     "image",
-                    tooltip="Input image batch. Each entry is processed on its own; all entries must end up with the same grid size.",
+                    tooltip=(
+                        "Input image batch, RGB or RGBA. Each entry is processed on its own; all entries "
+                        "must end up with the same grid size. RGBA is the normal case with Qwen-Image-2.1, "
+                        "whose VAE carries four channels so it can generate and edit transparent images."
+                    ),
                 ),
                 io.Combo.Input(
                     "sampling",
@@ -375,7 +509,12 @@ class PixelGridRestore(io.ComfyNode):
             outputs=[
                 io.Image.Output(
                     display_name="image",
-                    tooltip="Resampled pixel image: one pixel per detected/forced grid cell.",
+                    tooltip=(
+                        "Resampled pixel image: one pixel per detected/forced grid cell. RGBA when the input "
+                        "carried real transparency (alpha is resampled onto the exact same grid lines as the "
+                        "colour, so the mask stays pixel-aligned), RGB otherwise -- a fully opaque alpha is "
+                        "dropped rather than turning every ordinary result into 4 channels."
+                    ),
                 ),
                 io.Int.Output(
                     display_name="grid_w",
@@ -439,22 +578,33 @@ class PixelGridRestore(io.ComfyNode):
                 f"PixelGridRestore: unknown sampling {sampling!r}; expected one of {SAMPLING_OPTIONS}."
             ) from None
 
-        backend_label, get_perfect_pixel = _resolve_backend(backend)
+        backend_label, upstream = _resolve_backend(backend)
         detected = grid_mode == "Auto Detect"
 
-        imgs = _torch_image_to_uint8_rgb(image)  # numpy uint8 [B,H,W,C]
-        if imgs.ndim != 4 or imgs.shape[-1] != 3:
+        imgs = _torch_image_to_uint8_bhwc(image)  # numpy uint8 [B,H,W,C]
+        if imgs.ndim != 4 or imgs.shape[-1] not in (3, 4):
             raise ValueError(
-                f"PixelGridRestore: expected IMAGE as [B,H,W,3], got {tuple(imgs.shape)}."
+                f"PixelGridRestore: expected IMAGE as [B,H,W,3] or [B,H,W,4], "
+                f"got {tuple(imgs.shape)}."
             )
 
-        outs: list[torch.Tensor] = []
+        # Qwen-Image-2.1's VAE carries four channels so it can generate and edit
+        # transparent images, so RGBA arrives here routinely -- not as an edge
+        # case. Colour and alpha are separated because every colour algorithm
+        # below must not see alpha (it would be read as a 4th colour, and the
+        # grid detector's grey conversion would fold it into luminance).
+        rgb_batch, alpha_batch = _split_rgb_alpha(imgs)
+        input_has_alpha = alpha_batch is not None
+
+        rgb_outs: list[np.ndarray] = []
+        alpha_outs: list[np.ndarray | None] = []
         grid_sizes: list[tuple[int, int]] = []
         confidences: list[float] = []
         first_width = 0
 
-        for i in range(imgs.shape[0]):
-            rgb = imgs[i]  # [H,W,3] uint8
+        for i in range(rgb_batch.shape[0]):
+            rgb = rgb_batch[i]  # [H,W,3] uint8
+            alpha = alpha_batch[i] if input_has_alpha else None  # [H,W,1] uint8 | None
             height, width = rgb.shape[:2]
             if i == 0:
                 first_width = width
@@ -463,18 +613,17 @@ class PixelGridRestore(io.ComfyNode):
                 grid_mode, int(pixel_size), int(grid_w), int(grid_h), width, height
             )
 
-            # ``debug`` stays False, always: upstream's debug path imports
-            # matplotlib and calls plt.show(), which blocks a headless server.
             try:
-                w, h, out_rgb = get_perfect_pixel(
+                out_rgb, out_alpha = _pixelate(
+                    upstream,
                     rgb,
+                    alpha,
                     sample_method=sample_method,
                     grid_size=grid_size,
                     min_size=float(min_size),
                     peak_width=int(peak_width),
                     refine_intensity=float(refine_intensity),
                     fix_square=bool(fix_square),
-                    debug=False,
                 )
             except Exception as exc:  # noqa: BLE001 -- upstream leaks raw exceptions
                 raise RuntimeError(
@@ -484,9 +633,9 @@ class PixelGridRestore(io.ComfyNode):
                 ) from exc
 
             # The whole reason this node exists: upstream signals failure by
-            # returning ``None, None, image`` (same object, no exception). The V1
-            # node dropped w/h and emitted the untouched input.
-            if w is None or h is None:
+            # returning nothing rather than raising. The V1 node dropped that
+            # signal and emitted the untouched input.
+            if out_rgb is None:
                 raise RuntimeError(
                     f"PixelGridRestore: 网格检测失败 (grid detection failed) on image {i} "
                     f"({width}x{height}), backend={backend_label!r}, grid_mode={grid_mode!r}. "
@@ -495,12 +644,13 @@ class PixelGridRestore(io.ComfyNode):
                     "建议改用 grid_mode='By Pixel Size' 或 grid_mode='By Grid Count' 手动指定网格。"
                 )
 
-            out_t = _uint8_rgb_to_torch_image(out_rgb)  # [1,h,w,3]
-            outs.append(out_t)
-            out_w, out_h = int(out_t.shape[2]), int(out_t.shape[1])
-            grid_sizes.append((out_w, out_h))
+            rgb_outs.append(out_rgb)
+            alpha_outs.append(out_alpha)
+            out_h, out_w = out_rgb.shape[:2]
+            grid_sizes.append((int(out_w), int(out_h)))
             # Scored on the *input* image (that is what the user's eye judges)
-            # against the *refined* grid that was actually applied to it.
+            # against the *refined* grid that was actually applied to it. Colour
+            # only: grid periodicity has nothing to do with the alpha mask.
             confidences.append(_grid_confidence(rgb, out_w, out_h))
 
         # Batches must agree, otherwise there is nothing sane to stack.
@@ -512,7 +662,31 @@ class PixelGridRestore(io.ComfyNode):
                 f"{sorted(grid_sizes)}. Please process images one-by-one or ensure the same input sizing."
             )
 
-        out = torch.cat(outs, dim=0)  # [B,h,w,3]
+        stacked_rgb = np.stack(rgb_outs, axis=0)  # [B,h,w,3]
+
+        # Alpha is carried through only when the batch actually has transparency.
+        # The VAE emits 4 channels even for a fully opaque image, and turning
+        # every ordinary RGB result into RGBA would surprise every downstream
+        # node, so an all-opaque alpha is dropped. Batch-wide, not per image,
+        # because the stacked tensor needs one channel count.
+        carries_alpha = input_has_alpha and any(
+            a is not None and int(a.min()) < 255 for a in alpha_outs
+        )
+        if carries_alpha:
+            opaque = np.full_like(stacked_rgb[..., :1], 255)
+            stacked_alpha = np.stack(
+                [opaque if a is None else a for a in alpha_outs], axis=0
+            )
+            stacked = _join_rgb_alpha(stacked_rgb, stacked_alpha)
+        else:
+            stacked = stacked_rgb
+
+        # ``stacked`` is already batched [B,h,w,C], so this must NOT go through
+        # ``_uint8_rgb_to_torch_image``: that helper unsqueezes for the
+        # single-image case and would hand back a 5D tensor here.
+        if stacked.dtype != np.uint8:
+            stacked = np.clip(np.rint(stacked), 0, 255).astype(np.uint8)
+        out = torch.from_numpy(np.ascontiguousarray(stacked)).float() / 255.0
         out = torch.clamp(out, 0.0, 1.0)
 
         out_grid_w, out_grid_h = grid_sizes[0]

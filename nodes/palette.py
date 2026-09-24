@@ -51,7 +51,12 @@ import torch
 
 from comfy_api.latest import io
 
-from ._image_utils import _torch_image_to_uint8_rgb, _uint8_rgb_to_torch_image
+from ._image_utils import (
+    _join_rgb_alpha,
+    _split_rgb_alpha,
+    _torch_image_to_uint8_bhwc,
+    _uint8_rgb_to_torch_image,
+)
 from ._palette_utils import (
     DITHER_NONE,
     DITHER_OPTIONS,
@@ -221,14 +226,20 @@ class PixelPaletteExtract(io.ComfyNode):
         accent_protect: bool = True,
         tile_size: int = EXTRACT_TILE_SIZE,
     ) -> io.NodeOutput:
-        imgs = _torch_image_to_uint8_rgb(image)
-        if imgs.ndim != 4 or imgs.shape[-1] != 3:
+        imgs = _torch_image_to_uint8_bhwc(image)
+        if imgs.ndim != 4 or imgs.shape[-1] not in (3, 4):
             raise ValueError(
-                f"PixelPaletteExtract: expected IMAGE as [B,H,W,3], got {tuple(imgs.shape)}."
+                f"PixelPaletteExtract: expected IMAGE as [B,H,W,3] or [B,H,W,4], "
+                f"got {tuple(imgs.shape)}."
             )
 
+        # Alpha is a mask, not a colour. Handing RGBA to a k-means quantiser
+        # would let it spend palette entries on "transparent", which is not
+        # something anyone wants a colour swatch of. Accepted and ignored here.
+        rgb, _alpha = _split_rgb_alpha(imgs)
+
         palette, counts = extract_palette(
-            imgs,
+            rgb,
             colors=int(colors),
             method=method,
             space=space,
@@ -429,11 +440,18 @@ class PixelPaletteQuantize(io.ComfyNode):
         accent_protect: bool = True,
         palette=MISSING,
     ) -> io.NodeOutput:
-        imgs = _torch_image_to_uint8_rgb(image)
-        if imgs.ndim != 4 or imgs.shape[-1] != 3:
+        imgs = _torch_image_to_uint8_bhwc(image)
+        if imgs.ndim != 4 or imgs.shape[-1] not in (3, 4):
             raise ValueError(
-                f"PixelPaletteQuantize: expected IMAGE as [B,H,W,3], got {tuple(imgs.shape)}."
+                f"PixelPaletteQuantize: expected IMAGE as [B,H,W,3] or [B,H,W,4], "
+                f"got {tuple(imgs.shape)}."
             )
+
+        # Colour and alpha are separated for the whole node: the palette must be
+        # derived from colour alone, and alpha is re-attached untouched at the
+        # end. A transparent pixel has no colour to quantise, and quantising the
+        # mask would turn a soft edge into a palette entry.
+        rgb, alpha = _split_rgb_alpha(imgs)
 
         supplied = None
         if not _blank_palette_text(palette):
@@ -457,7 +475,7 @@ class PixelPaletteQuantize(io.ComfyNode):
             palette_rgb = supplied
         else:
             derived, _counts = extract_palette(
-                imgs,
+                rgb,
                 colors=int(colors),
                 method=method,
                 space=space,
@@ -469,12 +487,19 @@ class PixelPaletteQuantize(io.ComfyNode):
         if palette_rgb.shape[0] == 0:
             raise ValueError("PixelPaletteQuantize: the derived palette is empty.")
 
-        labels = map_to_palette(imgs, palette_rgb, space=space, dither=dither)
+        labels = map_to_palette(rgb, palette_rgb, space=space, dither=dither)
         out_rgb = palette_rgb[labels]  # [B,H,W,3] uint8; dither can only pick palette rows
 
-        out = torch.cat(
-            [_uint8_rgb_to_torch_image(out_rgb[i]) for i in range(out_rgb.shape[0])], dim=0
-        )
+        # Alpha passes through verbatim -- deliberately no "drop an all-opaque
+        # alpha" rule here, unlike PixelGridRestore. This node's contract is
+        # "quantise colour, touch nothing else", so an RGBA input yields an RGBA
+        # output whose alpha is byte-identical to the input's.
+        if alpha is not None:
+            out_rgb = _join_rgb_alpha(out_rgb, alpha)
+
+        # Already batched, so convert directly rather than per image through
+        # ``_uint8_rgb_to_torch_image`` (which unsqueezes for a single image).
+        out = torch.from_numpy(np.ascontiguousarray(out_rgb)).float() / 255.0
         out = torch.clamp(out, 0.0, 1.0)
 
         used = int(np.unique(labels).size)

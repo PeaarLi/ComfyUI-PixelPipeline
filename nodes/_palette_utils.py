@@ -520,8 +520,16 @@ def extract_palette(
     the same budget by shrinking the main cluster count.
     """
     imgs = np.ascontiguousarray(imgs, dtype=np.uint8)
+    # Deliberately stricter than the node inputs, which accept RGBA: this is an
+    # internal invariant, not a user-facing restriction. Both callers strip alpha
+    # (``_split_rgb_alpha``) before getting here, because a k-means quantiser
+    # handed RGBA would treat "transparent" as a fourth colour and spend palette
+    # entries on it. If this fires, a caller forgot to split.
     if imgs.ndim != 4 or imgs.shape[-1] != 3:
-        raise ValueError(f"expected uint8 RGB [B,H,W,3], got {tuple(imgs.shape)}.")
+        raise ValueError(
+            f"extract_palette expects uint8 RGB [B,H,W,3] (alpha must be split off "
+            f"first with _split_rgb_alpha), got {tuple(imgs.shape)}."
+        )
     if method not in EXTRACT_METHODS:
         raise ValueError(
             f"PixelPalette: unknown extraction method {method!r}; expected one of {EXTRACT_METHODS}."

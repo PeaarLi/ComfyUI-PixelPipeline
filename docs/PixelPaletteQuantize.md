@@ -154,6 +154,19 @@ tolerate `palette=None`. It only performs cheap structural checks (combo values,
 - `_selftest.py` asserts byte-identical output tensors across two runs, and
   identical hex strings for all five extraction methods in both colour spaces.
 
+## Transparency (RGBA)
+
+RGBA input is accepted, and the alpha channel is **passed through byte for
+byte**. The contract of this node is "quantise colour, touch nothing else": the
+palette is derived from the colour channels alone, because a k-means quantiser
+handed RGBA would treat *transparent* as a fourth colour and spend palette
+entries on it -- nobody wants a swatch of "transparent".
+
+Unlike [`PixelGridRestore`](PixelGridRestore.md) there is deliberately **no**
+"drop an all-opaque alpha" rule here, so an RGBA input always yields an RGBA
+output. That keeps the node predictable when it is used on its own rather than
+downstream of a grid restore.
+
 ## See also
 
 - [`PixelPaletteExtract`](PixelPaletteExtract.md) — the usual source of `palette`

@@ -898,6 +898,139 @@ def _section_lazy(by_name: dict, hex_a: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
+def _rgba_test_image(size: int = 512, cell: int = 8):
+    """A synthetic pixel-art image plus a real alpha mask, as ``[1,H,W,4]``.
+
+    The colour half is a regular grid of distinct colours so grid detection has
+    something genuine to find; the alpha half is opaque only in a centred square.
+    A correct implementation therefore has to produce alpha 0 in the surrounding
+    cells and 255 inside -- which is only possible if alpha is resampled onto the
+    *same* grid lines as the colour.
+
+    Returns ``(tensor, inset, cell)`` where ``inset`` is the pixel offset of the
+    opaque square from each edge.
+    """
+    import numpy as np
+    import torch
+
+    rgb = np.zeros((size, size, 3), np.uint8)
+    for y in range(0, size, cell):
+        for x in range(0, size, cell):
+            rgb[y : y + cell, x : x + cell] = (
+                ((x // cell) * 37) % 256,
+                ((y // cell) * 53) % 256,
+                128,
+            )
+
+    alpha = np.zeros((size, size, 1), np.uint8)
+    inset = size // 4
+    alpha[inset : size - inset, inset : size - inset] = 255
+
+    arr = np.concatenate([rgb, alpha], axis=-1)
+    t = torch.from_numpy(arr).float().unsqueeze(0) / 255.0
+    return t, inset, cell
+
+
+def section_alpha(nodes: list) -> None:
+    """RGBA coverage -- the gap that let a total-failure bug ship.
+
+    Qwen-Image-2.1's VAE carries four channels so it can generate and edit
+    transparent images natively, which means ``VAEDecode`` hands this pipeline
+    RGBA on *every* run, opaque or not. The rest of this file only ever used
+    three-channel PNGs, so nothing here caught the nodes rejecting four.
+    """
+    print("\n=== 11. alpha / RGBA (Qwen-Image-2.1's VAE emits 4 channels) ===")
+    import numpy as np
+
+    by_name = {n.GET_SCHEMA().node_id: n for n in nodes}
+    grid = by_name["PixelGridRestore"]
+    quant = by_name["PixelPaletteQuantize"]
+    extract = by_name["PixelPaletteExtract"]
+    scale = by_name["PixelExportScale"]
+
+    rgba, inset, cell = _rgba_test_image()
+    print(f"      input {tuple(rgba.shape)}, opaque square inset {inset}px, cell {cell}px")
+
+    # -- 11a. RGBA must not raise, and alpha must survive to a 4-channel output
+    try:
+        out, gw, gh, px, det, conf = grid.execute(
+            image=rgba, sampling="Majority Cluster", grid_mode="Auto Detect"
+        ).result
+        raised = None
+    except Exception as exc:  # noqa: BLE001
+        raised, out = exc, None
+
+    check("11a RGBA input does not raise", raised is None,
+          f"{type(raised).__name__}: {raised}" if raised else "")
+    if out is None:
+        return  # nothing further is testable
+
+    out_u8 = _to_u8(out)
+    print(f"      output {out_u8.shape}  grid {gw}x{gh}  confidence {conf:.3f}")
+    check("11a RGBA output keeps 4 channels", out_u8.shape[-1] == 4,
+          f"got {out_u8.shape}")
+    check("11a grid is the synthetic 64x64", (gw, gh) == (64, 64), f"got {gw}x{gh}")
+
+    if out_u8.shape[-1] == 4:
+        a = out_u8[0, :, :, 3]
+        k0, k1 = inset // cell, (rgba.shape[2] - inset) // cell
+        # Two cells of margin: the mask edge lands on a grid line, and the
+        # outermost cells are the ones a mis-aligned resample would smear.
+        inner = a[k0 + 2 : k1 - 2, k0 + 2 : k1 - 2]
+        above = a[: k0 - 2, :]
+        left = a[:, : k0 - 2]
+        check("11a alpha is opaque inside the mask", int(inner.min()) == 255,
+              f"min={int(inner.min())}")
+        check("11a alpha is transparent above the mask", int(above.max()) == 0,
+              f"max={int(above.max())}")
+        check("11a alpha is transparent left of the mask", int(left.max()) == 0,
+              f"max={int(left.max())}")
+        # The decisive one: if alpha had been resampled on its own grid rather
+        # than the colour's, the mask edge would land off the cell boundary and
+        # these cells would be partially transparent.
+        check("11a mask edge lands exactly on the grid (no partial cells)",
+              set(np.unique(a).tolist()) <= {0, 255},
+              f"distinct alpha values: {sorted(np.unique(a).tolist())[:8]}")
+
+    # -- 11b. an all-opaque alpha must be dropped, not propagated
+    opaque = rgba.clone()
+    opaque[..., 3] = 1.0
+    out_b, *_rest = grid.execute(
+        image=opaque, sampling="Majority Cluster", grid_mode="Auto Detect"
+    ).result
+    shape_b = tuple(_to_u8(out_b).shape)
+    print(f"      all-opaque input -> {shape_b}")
+    check("11b all-opaque alpha is dropped (RGB out)", len(shape_b) == 4 and shape_b[-1] == 3,
+          f"got {shape_b}")
+
+    # -- 11c. Quantize must pass alpha through byte-for-byte
+    q_out, _q_pal, _q_used = quant.execute(
+        image=out, method="Per-Tile k-means", colors=32, tile_size=cell,
+        space="Lab", dither="None", accent_protect=True, palette="",
+    ).result
+    q_u8 = _to_u8(q_out)
+    check("11c Quantize keeps 4 channels", q_u8.shape[-1] == 4, f"got {q_u8.shape}")
+    if q_u8.shape[-1] == 4:
+        check("11c Quantize leaves alpha byte-identical",
+              np.array_equal(q_u8[..., 3], out_u8[..., 3]), "alpha changed")
+
+    # -- 11d. Extract accepts RGBA (and must ignore alpha when choosing colours)
+    _h, _sw, count = extract.execute(
+        image=out, colors=32, method="Per-Tile k-means", space="Lab",
+        sort="Luminance", accent_protect=True, tile_size=cell,
+    ).result
+    check("11d Extract accepts RGBA", count > 0, f"count={count}")
+
+    # -- 11e. ExportScale carries alpha through untouched
+    sc, sw_w, sc_h = scale.execute(image=out, scale=4, mode="Nearest").result
+    sc_shape = tuple(sc.shape)
+    print(f"      ExportScale -> {sc_shape} ({sw_w}x{sc_h})")
+    check("11e ExportScale keeps 4 channels", sc_shape[-1] == 4, f"got {sc_shape}")
+    check("11e ExportScale quadruples the grid", (sc_h, sw_w) == (gh * 4, gw * 4),
+          f"got {sw_w}x{sc_h}")
+
+
+# --------------------------------------------------------------------------- #
 def main() -> int:
     # The failure message is bilingual; force UTF-8 so a cp936 console does not
     # mangle it into question marks.
@@ -923,6 +1056,11 @@ def main() -> int:
     except Exception:
         traceback.print_exc()
         _fail("palette behaviour section crashed", "see traceback above")
+    try:
+        section_alpha(nodes)
+    except Exception:
+        traceback.print_exc()
+        _fail("alpha/RGBA section crashed", "see traceback above")
 
     print("\n=== summary ===")
     print(f"  checks: {CHECKS}  failures: {len(FAILURES)}")

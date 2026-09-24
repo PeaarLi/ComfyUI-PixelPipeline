@@ -34,7 +34,13 @@ class PixelExportScale(io.ComfyNode):
                 "so a downstream Save/Resize node can be driven without guessing."
             ),
             inputs=[
-                io.Image.Input("image", tooltip="Pixel image to upscale, e.g. the output of Pixel Grid Restore."),
+                io.Image.Input(
+                    "image",
+                    tooltip=(
+                        "Pixel image to upscale, e.g. the output of Pixel Grid Restore. RGB or RGBA; alpha "
+                        "scales along with the colour channels, so a transparent sprite stays blocky."
+                    ),
+                ),
                 io.Int.Input(
                     "scale",
                     default=4,
@@ -55,7 +61,10 @@ class PixelExportScale(io.ComfyNode):
                 ),
             ],
             outputs=[
-                io.Image.Output(display_name="image", tooltip="Upscaled image, [B, H*scale, W*scale, 3]."),
+                io.Image.Output(
+                    display_name="image",
+                    tooltip="Upscaled image, [B, H*scale, W*scale, C] with C unchanged from the input.",
+                ),
                 io.Int.Output(display_name="width", tooltip="Resulting width in pixels (= input W * scale)."),
                 io.Int.Output(display_name="height", tooltip="Resulting height in pixels (= input H * scale)."),
             ],

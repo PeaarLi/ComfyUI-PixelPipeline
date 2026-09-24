@@ -78,6 +78,38 @@ Two honest caveats:
 In a batch the output is the **minimum** across images: one untrustworthy grid is
 reason to distrust the batch.
 
+## Transparency (RGBA)
+
+Qwen-Image-2.1's VAE carries **four** channels so the model can generate and edit
+transparent images natively, which means `VAEDecode` hands this node RGBA on
+every run -- opaque or not. Both three and four channels are accepted.
+
+Colour and alpha are separated for the whole node. The grid is detected and
+refined from the **colour** channels only -- folding alpha into the grey
+conversion would let a transparent region influence the detected pitch -- and
+then the **same grid coordinates** are used to sample alpha. That is the
+load-bearing detail. Sampling alpha onto its own grid, even with an identical
+cell count, lets the mask edge drift off the colour's cell boundaries: a soft
+halo appears and cells that should be fully transparent come back partly opaque.
+`_selftest.py` asserts the mask edge lands exactly on a cell boundary.
+
+Output channels follow what the input actually contains, decided **per batch**
+(the stacked tensor needs a single channel count):
+
+| input | output |
+|---|---|
+| RGB | RGB |
+| RGBA, all-opaque | **RGB** -- an all-opaque alpha is dropped rather than turning every ordinary result into 4 channels |
+| RGBA with real transparency | **RGBA**, with alpha resampled onto the same grid lines |
+
+**Alpha keeps the source mask's softness.** A diffusion model's transparent
+background normally has a soft edge, and the sampler picks one value per cell
+from within it, so the result can contain partially-transparent cells (a faint
+halo). The colour channels are strictly reduced to the palette, but alpha is
+*not* binarised -- flattening a mask is a separate, deliberate decision and not
+something a grid restore should make on your behalf. If you need a hard-edged
+mask, threshold it downstream.
+
 ## The three grid modes
 
 - **Auto Detect** — upstream FFT + gradient detection. Fast when it works, and it

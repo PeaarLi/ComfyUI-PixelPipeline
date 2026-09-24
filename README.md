@@ -36,6 +36,16 @@ execution graph rather than computed and discarded — that is what the `lazy`
 declaration on that input is for. See
 [`docs/PixelPaletteQuantize.md`](docs/PixelPaletteQuantize.md#the-lazy-palette-input).
 
+### Transparency (RGBA)
+
+Qwen-Image-2.1's VAE carries four channels, so `VAEDecode` emits RGBA on every
+run. The pipeline handles that end to end: `PixelGridRestore` resamples alpha
+onto the *exact same* grid lines as the colour so a transparent sprite's mask
+stays pixel-aligned, `PixelPaletteQuantize` passes alpha through untouched, and
+`PixelExportScale` scales it along with the colour channels. An all-opaque alpha
+is dropped by `PixelGridRestore`, so ordinary generations still come out as
+plain RGB rather than 4 channels.
+
 ## Install
 
 ```bash
@@ -86,7 +96,7 @@ only apply to unfiltered searches.
 
 ### `PixelGridRestore`
 
-`IMAGE -> IMAGE, grid_w, grid_h, pixel_size, detected`
+`IMAGE -> IMAGE, grid_w, grid_h, pixel_size, detected, confidence`
 
 Three ways to determine the grid:
 
@@ -105,6 +115,16 @@ Other inputs: `sampling` (`Majority Cluster` / `Center Sample` / `Median`),
 picking `Lightweight`), and four advanced parameters (`refine_intensity`,
 `min_size`, `peak_width`, `fix_square`) that were unreachable from the legacy
 V1 wrapper.
+
+**`confidence` is a diagnostic, not a gate.** Upstream auto-detection can
+return a grid that looks plausible and is wrong: a blurred gradient scores 64
+cells at an implied 8.00 px edge while a real pixel image scores 125 cells at
+8.192 px, and both sit inside upstream's own validity window, so a range check
+cannot separate them. Grid *periodicity* can — measured 1.0–2.6 for gradients,
+photos and text posters against 9.1–57.8 for real grids. Nothing is blocked on
+the value; wire it to a condition node if you want to gate on it. It reads 0 on
+the manual modes by design, because a forced pitch generally does not match the
+image's own periodicity.
 
 **Failures raise.** Upstream signals "I could not find a grid" by returning
 `None, None, image` — the *same object*, with no exception. A node that only
