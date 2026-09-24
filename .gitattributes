@@ -1,0 +1,11 @@
+# Store text as LF in the repository and in the working copy. This pack is pure
+# Python/JSON/Markdown, and ComfyUI servers are overwhelmingly Linux, so CRLF
+# translations would only add noise (and git warns about them on every add).
+* text=auto eol=lf
+
+# Binary assets, should any be added later.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.safetensors binary

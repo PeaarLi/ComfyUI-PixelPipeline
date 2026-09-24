@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtual environments (the pack runs inside ComfyUI's own venv)
+.venv/
+venv/
+env/
+
+# Local scratch
+*.log
+_selftest_out/

@@ -1,0 +1,4 @@
+# Only packages ComfyUI does NOT already ship are listed here.
+# torch / numpy / Pillow / scipy / opencv are provided by the ComfyUI runtime,
+# so they must not be pinned by this file.
+perfect-pixel[opencv]

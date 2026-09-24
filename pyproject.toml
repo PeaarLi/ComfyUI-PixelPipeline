@@ -1,0 +1,32 @@
+[project]
+name = "pixel-pipeline"
+version = "0.1.0"
+description = "Strict AI-image to pixel-art pipeline for ComfyUI: grid detection/restore, palette quantisation and crisp nearest-neighbour export."
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+# Single source of truth: ComfyUI Manager installs requirements.txt, and the
+# registry build reads the same file.
+dynamic = ["dependencies"]
+classifiers = [
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+# TODO: replace with the real public repository URL before publishing.
+Repository = "https://github.com/your-github-user/ComfyUI-PixelPipeline"
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.comfy]
+# TODO: replace with the publisher id from the Comfy Registry website
+# (usually your GitHub username) before running `comfy node publish`.
+PublisherId = "your-publisher-id"
+DisplayName = "Pixel Pipeline"
+Icon = ""
+# 0.37.0 is the only version this pack has actually been run against, so the
+# floor states the verified fact rather than a guessed minimum. The V3 schema
+# (comfy_api.latest.ComfyExtension / io), lazy inputs with check_lazy_status,
+# and io.BaseType.Input(advanced=...) are the newest capabilities used here;
+# lower bounds have NOT been tested.
+requires-comfyui = ">=0.37.0"
