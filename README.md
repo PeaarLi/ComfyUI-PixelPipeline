@@ -295,22 +295,33 @@ Full reference: [`docs/PixelExportScale.md`](docs/PixelExportScale.md).
 `IMAGE -> images (IMAGE), bg_color (STRING)`
 
 Keys a batch's background out and aligns the frames, ported from the local
-`webm2spritesheet.py` tool: the background colour is either named by `bg_color`
-or detected from the first frame's 2 px border ring, every frame is cropped to
-**one shared centred square** around the union of all content boxes (the
-animation keeps its registration instead of swimming inside per-frame crops),
-and background regions **connected to the frame border** are flood-keyed to
-transparency — enclosed same-coloured islands inside the character survive,
-which is the difference from a plain colour key. `remove_background=False`
-gives the crop-only "noclean" variant. Like the reference, it assumes a
-**flat** background — a gradient or textured AI background varies more than any
-safe tolerance, so flatten those upstream first.
+`webm2spritesheet.py` tool: the background colour is either pinned (`Fixed
+Colour`) or detected from the first frame's 2 px border ring (`Auto Detect`),
+every frame is cropped to **one shared centred square** around the union of all
+content boxes (the animation keeps its registration instead of swimming inside
+per-frame crops), and the background is flood-keyed to transparency.
+`remove_background=False` gives the crop-only "noclean" variant.
 
-Naming the colour matters when the first frame is not representative (a fade-in,
-something already over the edge): detection reads frame 0's border ring and
-nothing else. `bg_color` is one HEX colour and left empty means "detect", so
-typing nothing is never mistaken for black; the output echoes whichever colour
-was actually used.
+The two colour controls are a mode selector for exactly the reason the grid
+nodes have one — "which is it using?" should be visible on the node, not
+inferred from an empty text field.
+
+`outer_only` (default on) keys only background regions **connected to the frame
+border**, so enclosed pockets and background-coloured detail inside the
+character survive. Turning it off keys every matching pixel, which clears a
+pocket trapped between a shadow and a cape — but it is not a free win: measured
+on a Qwen sheet at the tolerance that gradient needed, the pixels it removed
+beyond the default were **2% real pocket and 98% the sprite's own light armour
+plate**, which that tolerance could not tell from the background, and two of the
+three frames had no pocket to gain. Full numbers in
+[the node reference](docs/PixelBackgroundRemove.md#measured-what-the-toggle-actually-costs).
+
+`color_tolerance` defaults to **60**, raised from the reference's 12. On a
+Qwen-generated sheet the "solid" purple varied by 93–159 summed RGB across the
+frame, so the old default matched nothing and the node silently did nothing —
+worth knowing, since the useful range on real AI output is far above what
+"tolerance" usually suggests. A very high tolerance starts eating sprite pixels
+near the background colour, so raise it until the sprite survives.
 
 Full reference: [`docs/PixelBackgroundRemove.md`](docs/PixelBackgroundRemove.md).
 

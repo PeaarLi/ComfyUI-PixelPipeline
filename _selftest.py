@@ -1701,29 +1701,46 @@ def section_sprite_schema(nodes: list) -> None:
     ins, outs = _schema_rows(by_name["PixelBackgroundRemove"].GET_SCHEMA())
     check("remove-bg top-level input ids are exactly the contract",
           [r["id"] for r in ins] == ["image", "bg_color", "color_tolerance", "padding_ratio",
-                                     "remove_background"],
+                                     "remove_background", "outer_only"],
           str([r["id"] for r in ins]))
     check("remove-bg top-level input types",
-          [r["type"] for r in ins] == ["IMAGE", "STRING", "INT", "FLOAT", "BOOLEAN"],
+          [r["type"] for r in ins] == ["IMAGE", "COMFY_DYNAMICCOMBO_V3", "INT", "FLOAT",
+                                       "BOOLEAN", "BOOLEAN"],
           str([r["type"] for r in ins]))
     check("remove-bg defaults and ranges",
-          [(r["id"], r["default"], r["min"], r["max"]) for r in ins[1:]] == [
-              ("bg_color", "", None, None),
-              ("color_tolerance", 12, 0, 255),
+          [(r["id"], r["default"], r["min"], r["max"]) for r in ins[2:]] == [
+              ("color_tolerance", 60, 0, 255),
               ("padding_ratio", 0.05, 0.0, 1.0),
-              ("remove_background", True, None, None)],
-          str([(r["id"], r["default"], r["min"], r["max"]) for r in ins[1:]]))
+              ("remove_background", True, None, None),
+              ("outer_only", True, None, None)],
+          str([(r["id"], r["default"], r["min"], r["max"]) for r in ins[2:]]))
+    opts = _dynamic_options(by_name["PixelBackgroundRemove"].GET_SCHEMA())
+    check("remove-bg's bg_color is a two-mode combo",
+          list(opts) == ["bg_color"]
+          and list(opts["bg_color"]) == ["Auto Detect", "Fixed Colour"],
+          str(list(opts.get("bg_color", {}))))
+    # Option order is the only default lever DynamicCombo.Input has.
+    check("'Auto Detect' is the FIRST bg_color option (that is what makes it the default)",
+          next(iter(opts["bg_color"])) == "Auto Detect")
+    check("Auto Detect carries no nested parameters",
+          opts["bg_color"]["Auto Detect"] == [], str(opts["bg_color"]["Auto Detect"]))
+    fixed = {r["id"]: r for r in opts["bg_color"]["Fixed Colour"]}
+    check("Fixed Colour carries only hex, a non-empty STRING default",
+          list(fixed) == ["hex"] and fixed["hex"]["type"] == "STRING",
+          str(list(fixed)))
     check("remove-bg schema defaults equal the module constants",
-          ins[1]["default"] == sp.DEFAULT_BG_COLOR
+          fixed["hex"]["default"] == sp.DEFAULT_BG_COLOR
           and ins[2]["default"] == sp.DEFAULT_COLOR_TOLERANCE
           and ins[3]["default"] == sp.DEFAULT_PADDING_RATIO)
-    check("remove-bg constants match the reference script",
+    check("remove-bg constants",
           (sp.DEFAULT_BG_COLOR, sp.DEFAULT_COLOR_TOLERANCE, sp.DEFAULT_PADDING_RATIO,
-           sp.PADDING_MIN_PX) == ("", 12, 0.05, 2),
+           sp.PADDING_MIN_PX, sp.DEFAULT_OUTER_ONLY) == ("#FFFFFF", 60, 0.05, 2, True),
           str((sp.DEFAULT_BG_COLOR, sp.DEFAULT_COLOR_TOLERANCE, sp.DEFAULT_PADDING_RATIO,
-               sp.PADDING_MIN_PX)))
+               sp.PADDING_MIN_PX, sp.DEFAULT_OUTER_ONLY)))
     check("remove-bg has no optional/lazy/advanced inputs",
-          not any(r["optional"] or r["lazy"] or r["advanced"] for r in ins))
+          not any(r["optional"] or r["lazy"] or r["advanced"] for r in ins)
+          and not any(r["optional"] or r["lazy"] or r["advanced"]
+                      for mode in opts["bg_color"].values() for r in mode))
     check("remove-bg outputs are images + bg_color",
           outs == [("images", "IMAGE"), ("bg_color", "STRING")], str(outs))
 
@@ -1824,6 +1841,44 @@ def section_sprite_contract(nodes: list) -> None:
           isinstance(raised, ValueError) and "Nonsense" in str(raised),
           f"{type(raised).__name__}: {raised}")
 
+    # The remove node's bg_color is a DynamicCombo too, so it gets the same
+    # treatment: drive the real machinery rather than trusting a hand-written dict.
+    from pixelpipe.nodes import background_remove as br
+
+    schema = by_name["PixelBackgroundRemove"].GET_SCHEMA()
+    raw = _io.create_input_dict_v1(schema.inputs)
+    check("bg_color serialises as COMFY_DYNAMICCOMBO_V3",
+          raw["required"]["bg_color"][0] == "COMFY_DYNAMICCOMBO_V3",
+          str(raw["required"]["bg_color"][0]))
+
+    flat = {"bg_color": "Fixed Colour", "bg_color.hex": "#123456"}
+    out, _missing, v3 = _io.get_finalized_class_inputs(raw, dict(flat))
+    got = _io.build_nested_inputs(dict(flat), v3)["bg_color"]
+    prefixed = {k.split(".", 1)[1] for k in out["required"] if k.startswith("bg_color.")}
+    print(f"      Fixed Colour  -> {got}")
+    check("Fixed Colour: execute receives the selected key inside the input's own dict",
+          got.get("bg_color") == "Fixed Colour", str(got))
+    check("Fixed Colour: hex arrives alongside it",
+          {k: v for k, v in got.items() if k != "bg_color"} == {"hex": "#123456"}, str(got))
+    check("Fixed Colour: exactly hex becomes required",
+          prefixed == {"hex"}, str(sorted(prefixed)))
+    check("Fixed Colour: _unpack_bg_color round-trips",
+          br._unpack_bg_color(got) == ("Fixed Colour", got), str(br._unpack_bg_color(got)))
+
+    flat = {"bg_color": "Auto Detect"}
+    out, _missing, v3 = _io.get_finalized_class_inputs(raw, dict(flat))
+    got = _io.build_nested_inputs(dict(flat), v3).get("bg_color")
+    prefixed = {k.split(".", 1)[1] for k in out["required"] if k.startswith("bg_color.")}
+    print(f"      Auto Detect   -> {got}")
+    check("Auto Detect: whatever build_nested_inputs produces unpacks to Auto Detect",
+          br._unpack_bg_color(got)[0] == "Auto Detect", str(got))
+    check("Auto Detect: no nested parameters become required",
+          prefixed == set(), str(sorted(prefixed)))
+    check("a prompt with no bg_color at all behaves as Auto Detect",
+          br._unpack_bg_color(None)[0] == "Auto Detect", str(br._unpack_bg_color(None)))
+    check("a bare (unmatched) bg_color string is passed through for the caller to reject",
+          br._unpack_bg_color("Nonsense")[0] == "Nonsense")
+
 
 # --------------------------------------------------------------------------- #
 # 17. Sprite node behaviour
@@ -1878,46 +1933,70 @@ def section_sprite_behaviour(nodes: list) -> None:
     check("17a registration: frame 2's square lands at crop offset (7, 10)",
           bool((u8[2, 10:14, 7:11, 3] == 255).all()))
 
-    # -- 17l. an explicit bg_color replaces detection entirely
+    # -- 17l. the Fixed Colour mode replaces detection entirely
     # Same colour as the detector finds: the whole result must be unchanged, which
     # is what proves the override feeds the same code path rather than a parallel one.
-    out_s, bg_s = prepare.execute(image=fixture, bg_color="#0AC81E").result
-    check("17l naming the detected colour reproduces the detection result exactly",
+    pinned = {"bg_color": "Fixed Colour", "hex": "#0AC81E"}
+    out_s, bg_s = prepare.execute(image=fixture, bg_color=pinned).result
+    check("17l pinning the detected colour reproduces the detection result exactly",
           bg_s == "#0AC81E" and torch.equal(out_s, out), bg_s)
     # A colour that appears nowhere: nothing matches it, so nothing is keyed
     # (alpha stays opaque and is dropped) and every pixel differs from it, so the
     # content box is the whole frame. Both effects must show up.
-    out_w, bg_w = prepare.execute(image=fixture, bg_color="#C81E0A").result
+    out_w, bg_w = prepare.execute(
+        image=fixture, bg_color={"bg_color": "Fixed Colour", "hex": "#C81E0A"}).result
     check("17l an unmatched colour keys nothing and crops nothing",
           bg_w == "#C81E0A" and tuple(out_w.shape) == (3, 24, 24, 3),
           f"{bg_w} {tuple(out_w.shape)}")
-    # The output must echo what was actually used, not what detection would have said.
     check("17l bg_color echoes the override, not the detected green",
           bg_w != "#0AC81E", bg_w)
     check("17l shorthand #RGB expands each digit",
-          prepare.execute(image=fixture, bg_color="#0C1").result[1] == "#00CC11")
+          prepare.execute(image=fixture,
+                          bg_color={"bg_color": "Fixed Colour", "hex": "#0C1"}).result[1]
+          == "#00CC11")
     check("17l surrounding whitespace and a missing # are tolerated",
-          prepare.execute(image=fixture, bg_color="  0ac81e ").result[1] == "#0AC81E")
-    # An empty value means "detect", so it must not be mistaken for black.
-    out_e0, bg_e0 = prepare.execute(image=fixture, bg_color="").result
-    check("17l an empty bg_color falls back to detection",
-          bg_e0 == "#0AC81E" and torch.equal(out_e0, out), bg_e0)
-    check("17l a whitespace-only bg_color falls back to detection",
-          prepare.execute(image=fixture, bg_color="   ").result[1] == "#0AC81E")
+          prepare.execute(image=fixture,
+                          bg_color={"bg_color": "Fixed Colour", "hex": "  0ac81e "}).result[1]
+          == "#0AC81E")
+    # Auto Detect must ignore any hex value the prompt still carries along.
+    out_ad, bg_ad = prepare.execute(
+        image=fixture, bg_color={"bg_color": "Auto Detect", "hex": "#C81E0A"}).result
+    check("17l Auto Detect ignores a stale hex value",
+          bg_ad == "#0AC81E" and torch.equal(out_ad, out), bg_ad)
+    check("17l a prompt with no bg_color at all behaves as Auto Detect",
+          torch.equal(prepare.execute(image=fixture, bg_color=None).result[0], out))
     raised = None
     try:
-        prepare.execute(image=fixture, bg_color="not-a-colour")
+        prepare.execute(image=fixture,
+                        bg_color={"bg_color": "Fixed Colour", "hex": "not-a-colour"})
     except ValueError as exc:
         raised = exc
-    check("17l an unparseable bg_color raises ValueError naming the node",
+    check("17l an unparseable hex raises ValueError naming the node",
           isinstance(raised, ValueError) and "PixelBackgroundRemove" in str(raised),
           f"{type(raised).__name__}: {raised}")
     raised = None
     try:
-        prepare.execute(image=fixture, bg_color="#0AC81E\n#FFFFFF")
+        prepare.execute(image=fixture,
+                        bg_color={"bg_color": "Fixed Colour", "hex": "#0AC81E\n#FFFFFF"})
     except ValueError as exc:
         raised = exc
     check("17l two colours are rejected rather than silently taking the first",
+          isinstance(raised, ValueError) and "exactly one" in str(raised),
+          f"{type(raised).__name__}: {raised}")
+    raised = None
+    try:
+        prepare.execute(image=fixture, bg_color="Nonsense")
+    except ValueError as exc:
+        raised = exc
+    check("17l an unknown bg_color mode raises ValueError naming the mode",
+          isinstance(raised, ValueError) and "Nonsense" in str(raised),
+          f"{type(raised).__name__}: {raised}")
+    raised = None
+    try:
+        prepare.execute(image=fixture, bg_color={"bg_color": "Fixed Colour", "hex": ""})
+    except ValueError as exc:
+        raised = exc
+    check("17l Fixed Colour with an empty hex is an error, not a silent detect",
           isinstance(raised, ValueError) and "exactly one" in str(raised),
           f"{type(raised).__name__}: {raised}")
 
@@ -1934,6 +2013,25 @@ def section_sprite_behaviour(nodes: list) -> None:
     check("17b the enclosed background island keeps its alpha",
           bool((i8[0, 5:7, 5:7, 3] == 255).all()), str(i8[0, 5:7, 5:7, 3]))
     check("17b the outer background is keyed out", bool(i8[0, 0, 0, 3] == 0))
+
+    # -- 17m. outer_only=False keys the enclosed island too, and nothing else changes
+    out_m, _ = prepare.execute(
+        image=torch.from_numpy(island).float() / 255.0, outer_only=False).result
+    m8 = _to_u8(out_m)
+    print(f"      outer_only=False -> {tuple(out_m.shape)}")
+    check("17m the same crop is used either way", m8.shape == i8.shape, str(m8.shape))
+    check("17m the enclosed island is keyed out as well",
+          bool((m8[0, 5:7, 5:7, 3] == 0).all()), str(m8[0, 5:7, 5:7, 3]))
+    check("17m the sprite itself is untouched",
+          bool((m8[0, 3:5, 3:5, 3] == 255).all() and (m8[0, 3, 3, :3] == [200, 30, 30]).all()),
+          str(m8[0, 3, 3]))
+    check("17m every transparent pixel is exactly the background colour",
+          bool((m8[0][m8[0][..., 3] == 0][:, :3] == [10, 200, 30]).all()))
+    # On a frame with no enclosed pocket the two settings must agree exactly --
+    # that is what makes outer_only=True a safe default rather than a behaviour change.
+    out_o, _ = prepare.execute(image=fixture, outer_only=False).result
+    check("17m with no enclosed pocket the two settings are byte-identical",
+          torch.equal(out_o, out), f"{tuple(out_o.shape)} vs {tuple(out.shape)}")
 
     # -- 17c. remove_background=False crops but creates no alpha (noclean variant)
     out_c, _ = prepare.execute(image=fixture, remove_background=False).result

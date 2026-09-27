@@ -3,12 +3,15 @@
 Ported from the cleaning stage of the standalone ``webm2spritesheet.py`` and
 adapted from video files to ComfyUI IMAGE batches. Three steps:
 
-1. **Background colour.** Either the ``bg_color`` input names it, or the most
-   frequent colour in the first frame's 2 px border ring is taken. Detection is
-   first-frame-only, like the reference script -- a representative first frame
-   is the caller's job. Naming the colour explicitly is the escape hatch for a
-   first frame whose border is not representative, and it makes the keying
-   reproducible across runs of different clips.
+1. **Background colour.** Either the ``bg_color`` combo pins it ("Fixed Colour")
+   or the most frequent colour in the first frame's 2 px border ring is taken
+   ("Auto Detect"). Detection is first-frame-only, like the reference script --
+   a representative first frame is the caller's job. Pinning the colour is the
+   escape hatch for a first frame whose border is not representative, and it
+   makes the keying reproducible across runs of different clips. The mode is a
+   DynamicCombo rather than an empty-string-means-auto field so that which of
+   the two is in play is visible on the node instead of inferred from the
+   field's contents.
 2. **One shared crop.** The content boxes of ALL frames are unioned and every
    frame is cropped to a single centred square around that union, so the
    animation keeps its registration instead of jittering inside per-frame
@@ -20,10 +23,18 @@ adapted from video files to ComfyUI IMAGE batches. Three steps:
    marks the transparent *background* as content -- for an opaque sprite on a
    transparent canvas that is the whole frame, so the crop could never shrink.
    The direction is fixed here (``alpha > 0``); the colour path is untouched.
-3. **Optional flood keying.** Background-coloured regions connected to the
-   cropped frame's border become transparent. Interior islands of the same
-   colour survive -- that is the difference from a plain colour key, and the
-   reason a character with background-coloured details does not get holes.
+3. **Optional flood keying.** With ``outer_only`` (the default) only
+   background-coloured regions *connected to the cropped frame's border* become
+   transparent, so an interior island of the same colour survives -- that is
+   the difference from a plain colour key, and the reason a character with
+   background-coloured details does not get holes. Turning ``outer_only`` off
+   keys every matching pixel instead, which also clears pockets the border
+   cannot reach but punches holes wherever the sprite shares the background
+   colour. Neither setting dominates, so both are offered.
+
+   Keying is not the only consumer of the background colour: with
+   ``remove_background`` off the colour still decides what counts as content,
+   and therefore the crop window and the output size.
 
 Two reference quirks are kept on purpose:
 
@@ -48,31 +59,48 @@ from ._image_utils import (
     _torch_image_to_uint8_bhwc,
 )
 from ._palette_utils import parse_palette_hex
+from .grid_restore import _pick
 
 __all__ = ["PixelBackgroundRemove"]
 NODE_ID = "PixelBackgroundRemove"
 
-# Reference-script constants (webm2spritesheet.py). Schema defaults live here
-# so ``_selftest.py`` can assert the two cannot drift apart.
-DEFAULT_BG_COLOR = ""          # empty = detect from the first frame's border
-DEFAULT_COLOR_TOLERANCE = 12   # COLOR_TOLERANCE
+BG_COLOR_MODES = ["Auto Detect", "Fixed Colour"]
+
+# Schema defaults live here so ``_selftest.py`` can assert the two cannot drift
+# apart. The colour modes are the node's own; the rest are the reference
+# script's (webm2spritesheet.py) except color_tolerance, see below.
+DEFAULT_BG_COLOR = "#FFFFFF"   # the Fixed Colour default; white is a common sheet background
+DEFAULT_COLOR_TOLERANCE = 60   # COLOR_TOLERANCE, raised from the reference's 12 -- see the tooltip
 DEFAULT_PADDING_RATIO = 0.05   # PADDING_RATIO
+DEFAULT_OUTER_ONLY = True      # border-connected keying, i.e. the reference's behaviour
 PADDING_MIN_PX = 2             # PADDING_MIN_PX, deliberately not exposed
 BORDER_PX = 2                  # border ring width used for background sampling
 
 
-def _resolve_bg_color(bg_color: str, rgb0: np.ndarray) -> np.ndarray:
-    """The effective background colour as int16 ``(3,)``: named, or detected.
+def _unpack_bg_color(bg_color) -> tuple[str, dict]:
+    """Normalise the ``bg_color`` DynamicCombo value handed to ``execute``.
 
-    An empty (or whitespace-only) value means "detect", which is also what the
-    input defaults to -- so a typed-in blank is never mistaken for black.
+    Mirrors ``grid_restore._unpack_grid_mode`` but is NOT that helper: that one
+    hardcodes the inner dict key ``"grid_mode"``. Handles ``None`` (a prompt
+    that never mentioned ``bg_color``), a bare unmatched string, and the empty
+    dict the internals may produce for the zero-nested-option case.
     """
-    if bg_color is not None and str(bg_color).strip():
-        colours = parse_palette_hex(bg_color, node_label=NODE_ID)
+    if isinstance(bg_color, str):
+        return bg_color, {}
+    if not bg_color:
+        return "Auto Detect", {}
+    mode = bg_color.get("bg_color")
+    return (mode if isinstance(mode, str) else "Auto Detect"), bg_color
+
+
+def _resolve_bg_color(mode: str, params: dict, rgb0: np.ndarray) -> np.ndarray:
+    """The effective background colour as int16 ``(3,)``: pinned, or detected."""
+    if mode == "Fixed Colour":
+        colours = parse_palette_hex(_pick(params, "hex", DEFAULT_BG_COLOR), node_label=NODE_ID)
         if colours.shape[0] != 1:
             raise ValueError(
-                f"{NODE_ID}: bg_color must name exactly one colour, got {colours.shape[0]}. "
-                f"Leave it empty to detect the background from the first frame instead."
+                f"{NODE_ID}: Fixed Colour needs exactly one colour, got {colours.shape[0]}. "
+                f"Switch bg_color to Auto Detect to take it from the first frame instead."
             )
         return colours[0].astype(np.int16)
     return _detect_bg_color(rgb0)
@@ -130,15 +158,25 @@ def _crop_square(bbox: tuple[int, int, int, int], img_w: int, img_h: int,
     return crop_left, crop_top, crop_w, crop_h
 
 
-def _flood_key(rgb: np.ndarray, alpha: np.ndarray, bg: np.ndarray, tolerance: int) -> None:
-    """Set alpha to 0 on background-coloured regions touching the frame border."""
-    diff = np.abs(rgb.astype(np.int16) - bg).sum(axis=-1)
-    regions, _ = label(diff <= tolerance)
-    border = (set(regions[0, :]) | set(regions[-1, :])
-              | set(regions[:, 0]) | set(regions[:, -1]))
-    border.discard(0)
-    if border:
-        alpha[np.isin(regions, list(border)), 0] = 0
+def _flood_key(rgb: np.ndarray, alpha: np.ndarray, bg: np.ndarray, tolerance: int,
+               outer_only: bool) -> None:
+    """Set alpha to 0 on background-coloured pixels of a cropped frame.
+
+    ``outer_only`` restricts that to regions connected to the frame border, which
+    is what keeps an enclosed background-coloured island (and background-coloured
+    detail inside the character) alive. Off, every matching pixel goes -- no
+    labelling needed, so that path is the cheaper of the two.
+    """
+    mask = np.abs(rgb.astype(np.int16) - bg).sum(axis=-1) <= tolerance
+    if outer_only:
+        regions, _ = label(mask)
+        border = (set(regions[0, :]) | set(regions[-1, :])
+                  | set(regions[:, 0]) | set(regions[:, -1]))
+        border.discard(0)
+        if not border:
+            return
+        mask = np.isin(regions, list(border))
+    alpha[mask, 0] = 0
 
 
 class PixelBackgroundRemove(io.ComfyNode):
@@ -166,15 +204,29 @@ class PixelBackgroundRemove(io.ComfyNode):
                         "frame 0 must have a representative background."
                     ),
                 ),
-                io.String.Input(
+                io.DynamicCombo.Input(
                     "bg_color",
-                    default=DEFAULT_BG_COLOR,
-                    dynamic_prompts=False,
+                    options=[
+                        io.DynamicCombo.Option("Auto Detect", []),
+                        io.DynamicCombo.Option("Fixed Colour", [
+                            io.String.Input(
+                                "hex",
+                                default=DEFAULT_BG_COLOR,
+                                dynamic_prompts=False,
+                                tooltip=(
+                                    "The background colour to key. '#RRGGBB'; '#RGB' and a bare "
+                                    "'RRGGBB' also work. Exactly one colour."
+                                ),
+                            ),
+                        ]),
+                    ],
                     tooltip=(
-                        "Optional. One HEX colour ('#RRGGBB'; '#RGB' and a bare 'RRGGBB' also work). "
-                        "Empty = detect it from the first frame's border ring. Set it when frame 0's "
-                        "border is not representative, or to key the same colour across several clips. "
-                        "The bg_color output echoes whichever colour was actually used."
+                        "Where the background colour comes from. 'Auto Detect' takes the most "
+                        "frequent colour in the FIRST frame's 2px border ring, so frame 0 must have a "
+                        "representative background. 'Fixed Colour' pins it instead -- use that when "
+                        "frame 0 starts mid-fade or already has something over the edge, and to key "
+                        "the same colour across several clips. The bg_color output echoes whichever "
+                        "was actually used. It is listed first, which makes it the default."
                     ),
                 ),
                 io.Int.Input(
@@ -184,9 +236,13 @@ class PixelBackgroundRemove(io.ComfyNode):
                     max=255,
                     step=1,
                     tooltip=(
-                        "A pixel counts as background when the summed per-channel RGB difference from "
-                        "the detected colour is <= this. Default 12 matches the reference script. "
-                        "Raise to swallow light background noise; 0 keys exact matches only."
+                        "A pixel counts as background when the summed per-channel RGB difference "
+                        "(|dR|+|dG|+|dB|) from the background colour is <= this. Raised from the "
+                        "reference script's 12 to 60 so that a gently varying AI background keys "
+                        "without tuning. Flat backgrounds are unaffected at 60. For a strong "
+                        "gradient, measure it: a Qwen-generated purple varied by 93-159 across the "
+                        "frame and needed ~200. Raising it also widens what counts as content, so a "
+                        "high value can eat sprite pixels that sit near the background colour."
                     ),
                 ),
                 io.Float.Input(
@@ -205,9 +261,23 @@ class PixelBackgroundRemove(io.ComfyNode):
                     "remove_background",
                     default=True,
                     tooltip=(
-                        "On: background-coloured pixels connected to the cropped frame's border become "
-                        "transparent (alpha 0); enclosed same-coloured islands inside the sprite "
-                        "survive. Off: the colour and the shared crop only, no alpha is created."
+                        "On: the background is keyed to transparent (alpha 0), as outer_only "
+                        "describes. Off: no alpha is created and you get the shared crop only. Note "
+                        "the colour is resolved either way -- it is what decides which pixels count "
+                        "as content, so turning this off changes the crop but not the need for a "
+                        "background colour."
+                    ),
+                ),
+                io.Boolean.Input(
+                    "outer_only",
+                    default=DEFAULT_OUTER_ONLY,
+                    tooltip=(
+                        "On (default): only background-coloured regions CONNECTED TO the cropped "
+                        "frame's border are keyed, so an enclosed pocket the border cannot reach -- "
+                        "and background-coloured detail inside the character -- survives. Off: every "
+                        "pixel close to the background colour is keyed, enclosed pockets included; "
+                        "that is what fixes a leftover patch trapped between a shadow and a cape, "
+                        "but it punches holes wherever the sprite itself uses the background colour."
                     ),
                 ),
             ],
@@ -231,10 +301,15 @@ class PixelBackgroundRemove(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, image: torch.Tensor, bg_color: str = DEFAULT_BG_COLOR,
+    def execute(cls, image: torch.Tensor, bg_color=None,
                 color_tolerance: int = DEFAULT_COLOR_TOLERANCE,
                 padding_ratio: float = DEFAULT_PADDING_RATIO,
-                remove_background: bool = True) -> io.NodeOutput:
+                remove_background: bool = True,
+                outer_only: bool = DEFAULT_OUTER_ONLY) -> io.NodeOutput:
+        mode, params = _unpack_bg_color(bg_color)
+        if mode not in BG_COLOR_MODES:
+            raise ValueError(f"{NODE_ID}: unknown bg_color mode {mode!r}; "
+                             f"expected one of {BG_COLOR_MODES}.")
         tolerance = int(color_tolerance)
         if not 0 <= tolerance <= 255:
             raise ValueError(f"{NODE_ID}: color_tolerance must be in 0..255, got {tolerance}.")
@@ -248,7 +323,7 @@ class PixelBackgroundRemove(io.ComfyNode):
         frames = _torch_image_to_uint8_bhwc(image)
         rgb, alpha = _split_rgb_alpha(frames)
         n, height, width = rgb.shape[:3]
-        bg = _resolve_bg_color(bg_color, rgb[0])
+        bg = _resolve_bg_color(mode, params, rgb[0])
         bbox = _union_content_bbox(rgb, alpha, bg, tolerance)
         if bbox is None:
             print(f"{NODE_ID}: no content found; keeping the full frame.")
@@ -262,7 +337,7 @@ class PixelBackgroundRemove(io.ComfyNode):
             if alpha is None:
                 alpha = np.full((n, crop_h, crop_w, 1), 255, dtype=np.uint8)
             for i in range(n):
-                _flood_key(rgb[i], alpha[i], bg, tolerance)
+                _flood_key(rgb[i], alpha[i], bg, tolerance, bool(outer_only))
 
         # Pack convention: an all-opaque alpha is dropped, batch-wide.
         if alpha is not None and int(alpha.min()) == 255:
