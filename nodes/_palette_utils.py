@@ -200,7 +200,8 @@ def format_palette_hex(palette: np.ndarray) -> str:
 _HEX_CHARS = set("0123456789abcdefABCDEF")
 
 
-def _parse_hex_token(token: str, where: str) -> tuple[int, int, int]:
+def _parse_hex_token(token: str, where: str,
+                     node_label: str = "PixelPaletteApply") -> tuple[int, int, int]:
     body = token.strip().lstrip("#")
     if body[:2].lower() == "0x":
         body = body[2:]
@@ -208,13 +209,13 @@ def _parse_hex_token(token: str, where: str) -> tuple[int, int, int]:
         body = "".join(c * 2 for c in body)
     if len(body) != 6 or not all(c in _HEX_CHARS for c in body):
         raise ValueError(
-            f"PixelPaletteApply: {where} 无法解析为 HEX 颜色 (cannot parse as a HEX colour): "
+            f"{node_label}: {where} 无法解析为 HEX 颜色 (cannot parse as a HEX colour): "
             f"{token!r}. Expected #RRGGBB (or RRGGBB / #RGB), one colour per line or comma separated."
         )
     return int(body[0:2], 16), int(body[2:4], 16), int(body[4:6], 16)
 
 
-def parse_palette_hex(text: str) -> np.ndarray:
+def parse_palette_hex(text: str, node_label: str = "PixelPaletteApply") -> np.ndarray:
     """Parse a HEX palette blob into ``[K, 3]`` uint8.
 
     Accepts newlines, commas, semicolons or plain whitespace as separators, with
@@ -222,6 +223,10 @@ def parse_palette_hex(text: str) -> np.ndarray:
     Duplicates are removed, keeping first-seen order, so the returned array is
     always a set of distinct colours. Raises ``ValueError`` on the first token
     that is not a colour -- a silently truncated palette would be worse.
+
+    ``node_label`` only affects the message prefix, so ``PixelBackgroundRemove``'s
+    single-colour errors name that node. The default keeps the palette node's
+    wording unchanged.
     """
     if text is None:
         return np.zeros((0, 3), dtype=np.uint8)
@@ -231,7 +236,7 @@ def parse_palette_hex(text: str) -> np.ndarray:
         return np.zeros((0, 3), dtype=np.uint8)
     seen: dict[tuple[int, int, int], None] = {}
     for i, tok in enumerate(toks):
-        seen.setdefault(_parse_hex_token(tok, f"第 {i + 1} 个色标 (token {i + 1})"))
+        seen.setdefault(_parse_hex_token(tok, f"第 {i + 1} 个色标 (token {i + 1})", node_label))
     return np.array(list(seen.keys()), dtype=np.uint8)
 
 

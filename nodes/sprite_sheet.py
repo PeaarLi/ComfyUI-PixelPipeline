@@ -60,7 +60,7 @@ class PixelSpriteSheet(io.ComfyNode):
                 io.Image.Input(
                     "image",
                     tooltip=(
-                        "Same-sized frames, RGB or RGBA. Normally the output of Pixel Sprite Prepare, "
+                        "Same-sized frames, RGB or RGBA. Normally the output of Pixel Background Remove, "
                         "so every cell is already the same centred square crop."
                     ),
                 ),

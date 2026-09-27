@@ -16,7 +16,7 @@ IMAGE -> sheet (IMAGE), columns (INT), rows (INT), cell_width (INT), cell_height
 
 | id | type | default | range | notes |
 |---|---|---|---|---|
-| `image` | IMAGE | — | — | Same-sized frames, RGB or RGBA. Normally the output of [`PixelSpritePrepare`](PixelSpritePrepare.md), so every cell is already the same centred square crop. |
+| `image` | IMAGE | — | — | Same-sized frames, RGB or RGBA. Normally the output of [`PixelBackgroundRemove`](PixelBackgroundRemove.md), so every cell is already the same centred square crop. |
 | `layout` | DYNAMICCOMBO | `Auto Square` | — | `Auto Square` (first option = default): `columns = ceil(sqrt(n))`, the reference script's near-square layout. `Fixed Columns`: wrap after exactly `columns` frames per row (`columns`: INT, `8`, 1–1024). |
 
 ## Outputs
@@ -41,7 +41,7 @@ produced arrives in the sheet byte-for-byte.
 `columns * rows - n` cells at the end of the grid are left zeroed, matching
 the reference's ffmpeg `tile` behaviour. In RGBA that is a transparent hole;
 in RGB it is black — if black is a meaningful sprite colour, run
-[`PixelSpritePrepare`](PixelSpritePrepare.md) first so the sheet carries
+[`PixelBackgroundRemove`](PixelBackgroundRemove.md) first so the sheet carries
 alpha.
 
 ## `Fixed Columns` beyond the frame count
@@ -64,5 +64,5 @@ not second-guess it.
 
 ## See also
 
-- [`PixelSpritePrepare`](PixelSpritePrepare.md) — cleans and aligns the frames before packing
+- [`PixelBackgroundRemove`](PixelBackgroundRemove.md) — cleans and aligns the frames before packing
 - [`PixelExportScale`](PixelExportScale.md) — crisp integer upscale of the finished sheet

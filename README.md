@@ -17,7 +17,7 @@ Built on the **V3 node schema** (`comfy_api.latest`), so nodes are declared with
 | 2. Palette extract | `PixelPaletteExtract` | [`docs/PixelPaletteExtract.md`](docs/PixelPaletteExtract.md) |
 | 3. Palette apply | `PixelPaletteApply` | [`docs/PixelPaletteApply.md`](docs/PixelPaletteApply.md) |
 | 4. Export scale | `PixelExportScale` | [`docs/PixelExportScale.md`](docs/PixelExportScale.md) |
-| 5. Sprite prepare | `PixelSpritePrepare` | [`docs/PixelSpritePrepare.md`](docs/PixelSpritePrepare.md) |
+| 5. Background remove | `PixelBackgroundRemove` | [`docs/PixelBackgroundRemove.md`](docs/PixelBackgroundRemove.md) |
 | 6. Sprite sheet | `PixelSpriteSheet` | [`docs/PixelSpriteSheet.md`](docs/PixelSpriteSheet.md) |
 
 ## Pipeline
@@ -35,7 +35,7 @@ IMAGE
 
 IMAGE (frame batch)
   │
-  └─► [PixelSpritePrepare] ──► images (aligned, background keyed) + bg_color   (optional)
+  └─► [PixelBackgroundRemove] ──► images (keyed, aligned) + bg_color   (optional)
             │
             └─► [PixelSpriteSheet] ──► sheet + columns + rows + cell_width + cell_height
 
@@ -290,23 +290,29 @@ is offered — any interpolating filter would undo the grid restore.
 
 Full reference: [`docs/PixelExportScale.md`](docs/PixelExportScale.md).
 
-### `PixelSpritePrepare`
+### `PixelBackgroundRemove`
 
 `IMAGE -> images (IMAGE), bg_color (STRING)`
 
-Cleans a frame batch for sprite-sheet packing, ported from the local
-`webm2spritesheet.py` tool: the background colour is detected from the first
-frame's 2 px border ring, every frame is cropped to **one shared centred
-square** around the union of all content boxes (the animation keeps its
-registration instead of swimming inside per-frame crops), and background
-regions **connected to the frame border** are flood-keyed to transparency —
-enclosed same-coloured islands inside the character survive, which is the
-difference from a plain colour key. `remove_background=False` gives the
-crop-only "noclean" variant. Like the reference, it assumes a **flat**
-background — a gradient or textured AI background varies more than any safe
-tolerance, so flatten those upstream first.
+Keys a batch's background out and aligns the frames, ported from the local
+`webm2spritesheet.py` tool: the background colour is either named by `bg_color`
+or detected from the first frame's 2 px border ring, every frame is cropped to
+**one shared centred square** around the union of all content boxes (the
+animation keeps its registration instead of swimming inside per-frame crops),
+and background regions **connected to the frame border** are flood-keyed to
+transparency — enclosed same-coloured islands inside the character survive,
+which is the difference from a plain colour key. `remove_background=False`
+gives the crop-only "noclean" variant. Like the reference, it assumes a
+**flat** background — a gradient or textured AI background varies more than any
+safe tolerance, so flatten those upstream first.
 
-Full reference: [`docs/PixelSpritePrepare.md`](docs/PixelSpritePrepare.md).
+Naming the colour matters when the first frame is not representative (a fade-in,
+something already over the edge): detection reads frame 0's border ring and
+nothing else. `bg_color` is one HEX colour and left empty means "detect", so
+typing nothing is never mistaken for black; the output echoes whichever colour
+was actually used.
+
+Full reference: [`docs/PixelBackgroundRemove.md`](docs/PixelBackgroundRemove.md).
 
 ### `PixelSpriteSheet`
 

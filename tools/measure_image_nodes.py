@@ -44,7 +44,7 @@ def main() -> int:
             custom.append(name)
 
     pack = {"PixelGridRestore", "PixelPaletteExtract", "PixelPaletteApply",
-            "PixelExportScale", "PixelSpritePrepare", "PixelSpriteSheet"}
+            "PixelExportScale", "PixelBackgroundRemove", "PixelSpriteSheet"}
     ranks = {n: accepting.index(n) + 1 for n in pack if n in accepting}
     print(f"nodes accepting an IMAGE input: {len(accepting)}")
     print(f"this pack's ranks (1-based):    {dict(sorted(ranks.items(), key=lambda kv: kv[1]))}")

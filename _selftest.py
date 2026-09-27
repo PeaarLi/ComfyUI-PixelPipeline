@@ -77,7 +77,7 @@ It checks, in order:
    as an exact ``Fraction``; VIDEO images being RGB with alpha in its own slot;
    frame identity, moving edges without trails, current-frame colour support,
    static noise reduction, alpha from either input route and chunk invariance.
-15. **Sprite node schema** -- ``PixelSpritePrepare``'s inputs/outputs and
+15. **Sprite node schema** -- ``PixelBackgroundRemove``'s inputs/outputs and
    ``PixelSpriteSheet``'s ``layout`` DynamicCombo: ``Auto Square`` first (the
    default lever), ``columns`` only under ``Fixed Columns``, and schema defaults
    equal to the module constants.
@@ -1692,36 +1692,39 @@ def section_sprite_schema(nodes: list) -> None:
     print("\n=== 15. sprite node schemas ===")
     by_name = {c.__name__: c for c in nodes}
     check("both sprite nodes are registered",
-          {"PixelSpritePrepare", "PixelSpriteSheet"} <= set(by_name), str(sorted(by_name)))
-    if not {"PixelSpritePrepare", "PixelSpriteSheet"} <= set(by_name):
+          {"PixelBackgroundRemove", "PixelSpriteSheet"} <= set(by_name), str(sorted(by_name)))
+    if not {"PixelBackgroundRemove", "PixelSpriteSheet"} <= set(by_name):
         return
-    from pixelpipe.nodes import sprite_prepare as sp
+    from pixelpipe.nodes import background_remove as sp
     from pixelpipe.nodes import sprite_sheet as ss
 
-    ins, outs = _schema_rows(by_name["PixelSpritePrepare"].GET_SCHEMA())
-    check("prepare top-level input ids are exactly the contract",
-          [r["id"] for r in ins] == ["image", "color_tolerance", "padding_ratio",
+    ins, outs = _schema_rows(by_name["PixelBackgroundRemove"].GET_SCHEMA())
+    check("remove-bg top-level input ids are exactly the contract",
+          [r["id"] for r in ins] == ["image", "bg_color", "color_tolerance", "padding_ratio",
                                      "remove_background"],
           str([r["id"] for r in ins]))
-    check("prepare top-level input types",
-          [r["type"] for r in ins] == ["IMAGE", "INT", "FLOAT", "BOOLEAN"],
+    check("remove-bg top-level input types",
+          [r["type"] for r in ins] == ["IMAGE", "STRING", "INT", "FLOAT", "BOOLEAN"],
           str([r["type"] for r in ins]))
-    check("prepare defaults and ranges",
+    check("remove-bg defaults and ranges",
           [(r["id"], r["default"], r["min"], r["max"]) for r in ins[1:]] == [
+              ("bg_color", "", None, None),
               ("color_tolerance", 12, 0, 255),
               ("padding_ratio", 0.05, 0.0, 1.0),
               ("remove_background", True, None, None)],
           str([(r["id"], r["default"], r["min"], r["max"]) for r in ins[1:]]))
-    check("prepare schema defaults equal the module constants",
-          ins[1]["default"] == sp.DEFAULT_COLOR_TOLERANCE
-          and ins[2]["default"] == sp.DEFAULT_PADDING_RATIO)
-    check("prepare constants match the reference script",
-          (sp.DEFAULT_COLOR_TOLERANCE, sp.DEFAULT_PADDING_RATIO, sp.PADDING_MIN_PX)
-          == (12, 0.05, 2),
-          str((sp.DEFAULT_COLOR_TOLERANCE, sp.DEFAULT_PADDING_RATIO, sp.PADDING_MIN_PX)))
-    check("prepare has no optional/lazy/advanced inputs",
+    check("remove-bg schema defaults equal the module constants",
+          ins[1]["default"] == sp.DEFAULT_BG_COLOR
+          and ins[2]["default"] == sp.DEFAULT_COLOR_TOLERANCE
+          and ins[3]["default"] == sp.DEFAULT_PADDING_RATIO)
+    check("remove-bg constants match the reference script",
+          (sp.DEFAULT_BG_COLOR, sp.DEFAULT_COLOR_TOLERANCE, sp.DEFAULT_PADDING_RATIO,
+           sp.PADDING_MIN_PX) == ("", 12, 0.05, 2),
+          str((sp.DEFAULT_BG_COLOR, sp.DEFAULT_COLOR_TOLERANCE, sp.DEFAULT_PADDING_RATIO,
+               sp.PADDING_MIN_PX)))
+    check("remove-bg has no optional/lazy/advanced inputs",
           not any(r["optional"] or r["lazy"] or r["advanced"] for r in ins))
-    check("prepare outputs are images + bg_color",
+    check("remove-bg outputs are images + bg_color",
           outs == [("images", "IMAGE"), ("bg_color", "STRING")], str(outs))
 
     ins, outs = _schema_rows(by_name["PixelSpriteSheet"].GET_SCHEMA())
@@ -1851,10 +1854,10 @@ def section_sprite_behaviour(nodes: list) -> None:
 
     print("\n=== 17. sprite node behaviour ===")
     by_name = {c.__name__: c for c in nodes}
-    if not {"PixelSpritePrepare", "PixelSpriteSheet"} <= set(by_name):
+    if not {"PixelBackgroundRemove", "PixelSpriteSheet"} <= set(by_name):
         _fail("both sprite nodes are registered", str(sorted(by_name)))
         return
-    prepare = by_name["PixelSpritePrepare"]
+    prepare = by_name["PixelBackgroundRemove"]
     sheet = by_name["PixelSpriteSheet"]
     fixture = _sprite_fixture()
 
@@ -1874,6 +1877,49 @@ def section_sprite_behaviour(nodes: list) -> None:
           str(u8[0, 3, 4]))
     check("17a registration: frame 2's square lands at crop offset (7, 10)",
           bool((u8[2, 10:14, 7:11, 3] == 255).all()))
+
+    # -- 17l. an explicit bg_color replaces detection entirely
+    # Same colour as the detector finds: the whole result must be unchanged, which
+    # is what proves the override feeds the same code path rather than a parallel one.
+    out_s, bg_s = prepare.execute(image=fixture, bg_color="#0AC81E").result
+    check("17l naming the detected colour reproduces the detection result exactly",
+          bg_s == "#0AC81E" and torch.equal(out_s, out), bg_s)
+    # A colour that appears nowhere: nothing matches it, so nothing is keyed
+    # (alpha stays opaque and is dropped) and every pixel differs from it, so the
+    # content box is the whole frame. Both effects must show up.
+    out_w, bg_w = prepare.execute(image=fixture, bg_color="#C81E0A").result
+    check("17l an unmatched colour keys nothing and crops nothing",
+          bg_w == "#C81E0A" and tuple(out_w.shape) == (3, 24, 24, 3),
+          f"{bg_w} {tuple(out_w.shape)}")
+    # The output must echo what was actually used, not what detection would have said.
+    check("17l bg_color echoes the override, not the detected green",
+          bg_w != "#0AC81E", bg_w)
+    check("17l shorthand #RGB expands each digit",
+          prepare.execute(image=fixture, bg_color="#0C1").result[1] == "#00CC11")
+    check("17l surrounding whitespace and a missing # are tolerated",
+          prepare.execute(image=fixture, bg_color="  0ac81e ").result[1] == "#0AC81E")
+    # An empty value means "detect", so it must not be mistaken for black.
+    out_e0, bg_e0 = prepare.execute(image=fixture, bg_color="").result
+    check("17l an empty bg_color falls back to detection",
+          bg_e0 == "#0AC81E" and torch.equal(out_e0, out), bg_e0)
+    check("17l a whitespace-only bg_color falls back to detection",
+          prepare.execute(image=fixture, bg_color="   ").result[1] == "#0AC81E")
+    raised = None
+    try:
+        prepare.execute(image=fixture, bg_color="not-a-colour")
+    except ValueError as exc:
+        raised = exc
+    check("17l an unparseable bg_color raises ValueError naming the node",
+          isinstance(raised, ValueError) and "PixelBackgroundRemove" in str(raised),
+          f"{type(raised).__name__}: {raised}")
+    raised = None
+    try:
+        prepare.execute(image=fixture, bg_color="#0AC81E\n#FFFFFF")
+    except ValueError as exc:
+        raised = exc
+    check("17l two colours are rejected rather than silently taking the first",
+          isinstance(raised, ValueError) and "exactly one" in str(raised),
+          f"{type(raised).__name__}: {raised}")
 
     # -- 17b. only border-connected background is keyed: an enclosed bg island survives
     island = np.tile(np.array([10, 200, 30], np.uint8), (1, 24, 24, 1))

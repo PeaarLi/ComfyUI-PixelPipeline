@@ -1,14 +1,14 @@
-# `PixelSpritePrepare`
+# `PixelBackgroundRemove`
 
 **Category:** `image/pixel pipeline`
-**Output kind:** processing node (sprite pre-stage)
+**Output kind:** processing node (background keying)
 
-Cleans a batch of animation frames for sprite-sheet packing: detects the
-background colour, crops every frame to **one shared centred square** around
-the union of all content boxes, and optionally flood-keys the border-connected
-background to transparency. Ported from the cleaning stage of the local
-`webm2spritesheet.py` tool (Webm2Frames), adapted from video files to ComfyUI
-`IMAGE` batches.
+Keys a batch's background out and aligns the frames: takes the background
+colour (given or detected), crops every frame to **one shared centred square**
+around the union of all content boxes, and optionally flood-keys the
+border-connected background to transparency. Ported from the cleaning stage of
+the local `webm2spritesheet.py` tool (Webm2Frames), adapted from video files to
+ComfyUI `IMAGE` batches.
 
 ```
 IMAGE -> images (IMAGE), bg_color (STRING)
@@ -18,17 +18,29 @@ IMAGE -> images (IMAGE), bg_color (STRING)
 
 | id | type | default | range | notes |
 |---|---|---|---|---|
-| `image` | IMAGE | — | — | Animation frames, RGB or RGBA, all the same size. The background colour is sampled from the **first frame's** border ring only, so frame 0 must have a representative background. |
-| `color_tolerance` | INT | `12` | 0–255 | A pixel counts as background when the summed per-channel RGB difference from the detected colour is ≤ this. `0` keys exact matches only. |
+| `image` | IMAGE | — | — | Frames or images, RGB or RGBA, all the same size. When `bg_color` is empty the background is sampled from the **first frame's** border ring only, so frame 0 must have a representative background. |
+| `bg_color` | STRING | `""` | — | Optional. One HEX colour (`#RRGGBB`; `#RGB` and a bare `RRGGBB` also work). Empty = detect. Set it when frame 0's border is not representative, or to key the same colour across several clips. Two colours are rejected rather than silently taking the first. |
+| `color_tolerance` | INT | `12` | 0–255 | A pixel counts as background when the summed per-channel RGB difference from the background colour is ≤ this. `0` keys exact matches only. |
 | `padding_ratio` | FLOAT | `0.05` | 0.0–1.0 | Crop margin: `side = max(content_w, content_h) + 2 * max(round(side * ratio), 2)`. The 2 px minimum is fixed. |
-| `remove_background` | BOOLEAN | `True` | — | Off = detection + shared crop only (the reference's "noclean" variant); no alpha is created. |
+| `remove_background` | BOOLEAN | `True` | — | Off = colour resolution + shared crop only (the reference's "noclean" variant); no alpha is created. |
 
 ## Outputs
 
 | display name | type | notes |
 |---|---|---|
 | `images` | IMAGE | Cropped (and optionally keyed) frames. RGBA when keying removed anything or the input carried real transparency, RGB otherwise — an all-opaque alpha is dropped, batch-wide. |
-| `bg_color` | STRING | Detected background colour as uppercase `#RRGGBB` text, for inspection. |
+| `bg_color` | STRING | The colour actually used, as uppercase `#RRGGBB`: the `bg_color` input echoed back, or the detected one when it was left empty. |
+
+## Specifying the colour vs. detecting it
+
+Detection reads the first frame's border ring, which assumes frame 0 is
+representative — usually true for a rendered clip, wrong for a first frame that
+starts mid-fade or already has a finger over the edge. Naming the colour also
+makes a batch reproducible: the same `#RRGGBB` keys the same colour across
+several clips regardless of what each one's first frame looks like.
+
+The output echoes whichever colour was used, so it doubles as a record of what
+detection chose when the input was left empty.
 
 ## Why one crop for the whole batch
 
@@ -36,8 +48,8 @@ Per-frame tight crops make every cell a different size and let the character
 drift inside them — sliced in an engine, the animation *swims*. Unioning all
 frames' content boxes and cropping once to a centred square keeps every pixel
 of the character at the same offset in every cell, which is the whole point of
-the pre-stage. The trade-off is deliberate: cells are looser than per-frame
-crops would give.
+this stage. The trade-off is deliberate: cells are looser than per-frame crops
+would give.
 
 ## Why flood fill, not a colour key
 
@@ -79,11 +91,13 @@ different position per frame (union box 9×11 px):
 | setting | result |
 |---|---|
 | defaults | `images` 3×15×15 RGBA (raw 11 + 2×2 padding), background keyed, `bg_color="#0AC81E"` |
+| `bg_color="#0AC81E"` | byte-identical to the detection result — the override feeds the same path |
+| `bg_color="#C81E0A"` | nothing matches, so nothing is keyed and every pixel is content: 3×24×24 RGB |
 | `remove_background=False` | `images` 3×15×15 RGB, same crop, no alpha |
 | all-background batch | full 24×24 frames, fully transparent alpha, note printed |
 
 ## See also
 
-- [`PixelSpriteSheet`](PixelSpriteSheet.md) — packs the cleaned frames into the sheet
+- [`PixelSpriteSheet`](PixelSpriteSheet.md) — packs the keyed frames into the sheet
 - [`PixelPaletteApply`](PixelPaletteApply.md) — quantise the cleaned frames to a shared palette before packing
 - [`PixelExportScale`](PixelExportScale.md) — crisp integer upscale of the finished sheet

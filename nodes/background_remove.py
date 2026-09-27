@@ -1,11 +1,14 @@
-"""``PixelSpritePrepare`` -- clean a frame batch for sprite-sheet packing.
+"""``PixelBackgroundRemove`` -- key a batch's background out, and align the frames.
 
 Ported from the cleaning stage of the standalone ``webm2spritesheet.py`` and
 adapted from video files to ComfyUI IMAGE batches. Three steps:
 
-1. **Background detection.** The most frequent colour in the first frame's
-   2 px border ring is taken as the background colour. First frame only, like
-   the reference script -- a representative first frame is the caller's job.
+1. **Background colour.** Either the ``bg_color`` input names it, or the most
+   frequent colour in the first frame's 2 px border ring is taken. Detection is
+   first-frame-only, like the reference script -- a representative first frame
+   is the caller's job. Naming the colour explicitly is the escape hatch for a
+   first frame whose border is not representative, and it makes the keying
+   reproducible across runs of different clips.
 2. **One shared crop.** The content boxes of ALL frames are unioned and every
    frame is cropped to a single centred square around that union, so the
    animation keeps its registration instead of jittering inside per-frame
@@ -44,16 +47,35 @@ from ._image_utils import (
     _split_rgb_alpha,
     _torch_image_to_uint8_bhwc,
 )
+from ._palette_utils import parse_palette_hex
 
-__all__ = ["PixelSpritePrepare"]
-NODE_ID = "PixelSpritePrepare"
+__all__ = ["PixelBackgroundRemove"]
+NODE_ID = "PixelBackgroundRemove"
 
 # Reference-script constants (webm2spritesheet.py). Schema defaults live here
 # so ``_selftest.py`` can assert the two cannot drift apart.
+DEFAULT_BG_COLOR = ""          # empty = detect from the first frame's border
 DEFAULT_COLOR_TOLERANCE = 12   # COLOR_TOLERANCE
 DEFAULT_PADDING_RATIO = 0.05   # PADDING_RATIO
 PADDING_MIN_PX = 2             # PADDING_MIN_PX, deliberately not exposed
 BORDER_PX = 2                  # border ring width used for background sampling
+
+
+def _resolve_bg_color(bg_color: str, rgb0: np.ndarray) -> np.ndarray:
+    """The effective background colour as int16 ``(3,)``: named, or detected.
+
+    An empty (or whitespace-only) value means "detect", which is also what the
+    input defaults to -- so a typed-in blank is never mistaken for black.
+    """
+    if bg_color is not None and str(bg_color).strip():
+        colours = parse_palette_hex(bg_color, node_label=NODE_ID)
+        if colours.shape[0] != 1:
+            raise ValueError(
+                f"{NODE_ID}: bg_color must name exactly one colour, got {colours.shape[0]}. "
+                f"Leave it empty to detect the background from the first frame instead."
+            )
+        return colours[0].astype(np.int16)
+    return _detect_bg_color(rgb0)
 
 
 def _detect_bg_color(rgb: np.ndarray) -> np.ndarray:
@@ -119,29 +141,40 @@ def _flood_key(rgb: np.ndarray, alpha: np.ndarray, bg: np.ndarray, tolerance: in
         alpha[np.isin(regions, list(border)), 0] = 0
 
 
-class PixelSpritePrepare(io.ComfyNode):
-    """Detect the background, apply one shared content crop, optionally key it out."""
+class PixelBackgroundRemove(io.ComfyNode):
+    """Resolve the background colour, apply one shared content crop, optionally key it out."""
 
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id=NODE_ID,
-            display_name="Pixel Sprite Prepare",
+            display_name="Pixel Background Remove",
             category="image/pixel pipeline",
             description=(
-                "Clean a batch of animation frames for sprite-sheet packing: detect the background "
-                "colour from the first frame's 2px border ring, crop every frame to ONE centred square "
-                "around the union of all content boxes (so the animation keeps registration), and "
-                "optionally flood-key border-connected background pixels to transparent. Interior "
-                "same-coloured pixels survive the keying."
+                "Key a batch's background out and align the frames: take the background colour from "
+                "bg_color or detect it from the first frame's 2px border ring, crop every frame to ONE "
+                "centred square around the union of all content boxes (so an animation keeps its "
+                "registration), and flood-key border-connected background pixels to transparent. "
+                "Interior same-coloured pixels survive the keying."
             ),
             inputs=[
                 io.Image.Input(
                     "image",
                     tooltip=(
-                        "Animation frames, RGB or RGBA, all the same size. The background colour is "
-                        "sampled from the FIRST frame's border ring only, so frame 0 must have a "
-                        "representative background."
+                        "Frames or images, RGB or RGBA, all the same size. When bg_color is left "
+                        "empty the background is sampled from the FIRST frame's border ring only, so "
+                        "frame 0 must have a representative background."
+                    ),
+                ),
+                io.String.Input(
+                    "bg_color",
+                    default=DEFAULT_BG_COLOR,
+                    dynamic_prompts=False,
+                    tooltip=(
+                        "Optional. One HEX colour ('#RRGGBB'; '#RGB' and a bare 'RRGGBB' also work). "
+                        "Empty = detect it from the first frame's border ring. Set it when frame 0's "
+                        "border is not representative, or to key the same colour across several clips. "
+                        "The bg_color output echoes whichever colour was actually used."
                     ),
                 ),
                 io.Int.Input(
@@ -174,7 +207,7 @@ class PixelSpritePrepare(io.ComfyNode):
                     tooltip=(
                         "On: background-coloured pixels connected to the cropped frame's border become "
                         "transparent (alpha 0); enclosed same-coloured islands inside the sprite "
-                        "survive. Off: detection and the shared crop only, no alpha is created."
+                        "survive. Off: the colour and the shared crop only, no alpha is created."
                     ),
                 ),
             ],
@@ -189,13 +222,17 @@ class PixelSpritePrepare(io.ComfyNode):
                 ),
                 io.String.Output(
                     display_name="bg_color",
-                    tooltip="Detected background colour as uppercase #RRGGBB text, for inspection.",
+                    tooltip=(
+                        "The background colour actually used, as uppercase #RRGGBB: the bg_color input "
+                        "echoed back, or the detected one when it was left empty."
+                    ),
                 ),
             ],
         )
 
     @classmethod
-    def execute(cls, image: torch.Tensor, color_tolerance: int = DEFAULT_COLOR_TOLERANCE,
+    def execute(cls, image: torch.Tensor, bg_color: str = DEFAULT_BG_COLOR,
+                color_tolerance: int = DEFAULT_COLOR_TOLERANCE,
                 padding_ratio: float = DEFAULT_PADDING_RATIO,
                 remove_background: bool = True) -> io.NodeOutput:
         tolerance = int(color_tolerance)
@@ -211,7 +248,7 @@ class PixelSpritePrepare(io.ComfyNode):
         frames = _torch_image_to_uint8_bhwc(image)
         rgb, alpha = _split_rgb_alpha(frames)
         n, height, width = rgb.shape[:3]
-        bg = _detect_bg_color(rgb[0])
+        bg = _resolve_bg_color(bg_color, rgb[0])
         bbox = _union_content_bbox(rgb, alpha, bg, tolerance)
         if bbox is None:
             print(f"{NODE_ID}: no content found; keeping the full frame.")
