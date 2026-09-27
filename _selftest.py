@@ -1,8 +1,8 @@
 """Standalone verification for ComfyUI-PixelPipeline. No ComfyUI server needed.
 
-Run with the ComfyUI venv interpreter:
+Run with the ComfyUI venv interpreter, from this directory:
 
-    E:\\ComfyUI\\.venv\\Scripts\\python.exe E:\\ComfyUI\\custom_nodes\\ComfyUI-PixelPipeline\\_selftest.py
+    python _selftest.py
 
 It checks, in order:
 
@@ -90,8 +90,8 @@ It checks, in order:
    RGBA composition, sheet layouts (auto / fixed / columns > n), row-major
    placement, empty trailing cells, channel preservation and determinism.
 
-Comparison images are written to ``E:\\ComfyUI\\output\\pixel_verify_*.png``.
-No video file is written: the encode check uses an in-memory buffer.
+Comparison images are written to ``pixel_verify_*.png`` in ComfyUI's output
+directory. No video file is written: the encode check uses an in-memory buffer.
 
 Exit code is 0 only when every check passes.
 """

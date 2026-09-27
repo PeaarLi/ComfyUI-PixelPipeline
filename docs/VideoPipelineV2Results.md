@@ -30,7 +30,7 @@
 
 ## 实测结果
 
-主对照输入：`E:\ComfyUI\output\video\MiniMax_H3_00008_.mp4`，736×736，56 帧，24 fps。
+主对照输入：`output/video/MiniMax_H3_00008_.mp4`（相对 ComfyUI 根目录），736×736，56 帧，24 fps。
 旧版从实施前工作区快照加载；与新版使用同一解码来源。固定 pixel_size=3；旧版 refine=0、fix_square=False。
 
 | 条件 | 输出网格 | 处理耗时（不含解码、编码） | 额外峰值 RSS | 第 12 帧暗像素占比 |

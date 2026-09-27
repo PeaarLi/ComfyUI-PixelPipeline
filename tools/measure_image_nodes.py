@@ -2,7 +2,7 @@
 
 Run with the ComfyUI Python environment, from anywhere:
 
-    E:\\ComfyUI\\.venv\\Scripts\\python.exe tools/measure_image_nodes.py
+    python tools/measure_image_nodes.py
 
 The claim it backs -- "N nodes accept an IMAGE input, this pack's rank is M, so
 the 64-slot search cut-off hides every custom node" -- went stale once already

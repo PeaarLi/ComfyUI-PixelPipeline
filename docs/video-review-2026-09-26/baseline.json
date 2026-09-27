@@ -15,9 +15,9 @@
     "locales/zh/nodeDefs.json": "d9472abee5d286fd33c56545c211db82b938f207178e07562400b3f5e880acd1"
   },
   "media_sha256": {
-    "E:\\ComfyUI\\output\\video\\MiniMax_H3_00008_.mp4": "e5cb19e1eff265b20df12b1c69d57876374d0300b5807bdd422d236445db05c5",
-    "E:\\ComfyUI\\output\\h3_08_ps3_nopal_tw0.mp4": "1c04ad99e809a524c1df5c21893b050b838175951efb75b040f941860c9c2484",
-    "E:\\ComfyUI\\output\\h3_08_nopal_ps3.mp4": "bd3427f7fd41f2d0f396bda06a231c3c1de9055942128a7984124dfdfd92c2b5",
-    "E:\\ComfyUI\\output\\h3_08_pixel_ps3.mp4": "4ed8e150410c9dfaa714c2da7185351c2c3bf43a438e5da95a8f470ac087957a"
+    "output\\video\\MiniMax_H3_00008_.mp4": "e5cb19e1eff265b20df12b1c69d57876374d0300b5807bdd422d236445db05c5",
+    "output\\h3_08_ps3_nopal_tw0.mp4": "1c04ad99e809a524c1df5c21893b050b838175951efb75b040f941860c9c2484",
+    "output\\h3_08_nopal_ps3.mp4": "bd3427f7fd41f2d0f396bda06a231c3c1de9055942128a7984124dfdfd92c2b5",
+    "output\\h3_08_pixel_ps3.mp4": "4ed8e150410c9dfaa714c2da7185351c2c3bf43a438e5da95a8f470ac087957a"
   }
 }

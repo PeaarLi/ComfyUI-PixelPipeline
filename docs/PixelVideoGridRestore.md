@@ -117,13 +117,13 @@ batch. Conversion is chunked, detection keeps only spectra, and temporal candida
 storage is bounded by the window rather than the video length. Larger grids and
 windows increase candidate storage. This is not a streaming decoder.
 
-Run with the ComfyUI environment:
+Run with the ComfyUI environment (its venv interpreter, from this directory):
 
 ```powershell
-E:\ComfyUI\.venv\Scripts\python.exe -m unittest discover -s tests -p test_video_pipeline.py -v
+python -m unittest discover -s tests -p test_video_pipeline.py -v
 node tests/test_video_migration.mjs
-E:\ComfyUI\.venv\Scripts\python.exe _selftest.py
-E:\ComfyUI\.venv\Scripts\python.exe tools/verify_video.py E:\ComfyUI\output\video\MiniMax_H3_00008_.mp4 --output _selftest_out/video_v2/check --pixel-size 3 --window 1
+python _selftest.py
+python tools/verify_video.py <clip.mp4> --output _selftest_out/video_v2/check --pixel-size 3 --window 1
 ```
 
 The real-video verifier saves pre-encoding frames, a nearest-scaled preview,

@@ -1,6 +1,6 @@
 [
   {
-    "file": "E:\\ComfyUI\\output\\video\\MiniMax_H3_00008_.mp4",
+    "file": "output\\video\\MiniMax_H3_00008_.mp4",
     "frames": 56,
     "width": 736,
     "height": 736,
@@ -33,7 +33,7 @@
     ]
   },
   {
-    "file": "E:\\ComfyUI\\output\\h3_08_ps3_nopal_tw0.mp4",
+    "file": "output\\h3_08_ps3_nopal_tw0.mp4",
     "frames": 56,
     "width": 1452,
     "height": 1464,
@@ -66,7 +66,7 @@
     ]
   },
   {
-    "file": "E:\\ComfyUI\\output\\h3_08_nopal_ps3.mp4",
+    "file": "output\\h3_08_nopal_ps3.mp4",
     "frames": 56,
     "width": 1452,
     "height": 1464,
@@ -99,7 +99,7 @@
     ]
   },
   {
-    "file": "E:\\ComfyUI\\output\\h3_08_pixel_ps3.mp4",
+    "file": "output\\h3_08_pixel_ps3.mp4",
     "frames": 56,
     "width": 1452,
     "height": 1464,

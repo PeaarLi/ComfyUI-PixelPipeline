@@ -1,6 +1,6 @@
 {
   "old-off": {
-    "input": "E:\\ComfyUI\\output\\video\\MiniMax_H3_00008_.mp4",
+    "input": "output\\video\\MiniMax_H3_00008_.mp4",
     "input_sha256": "e5cb19e1eff265b20df12b1c69d57876374d0300b5807bdd422d236445db05c5",
     "parameters": {
       "sampling": "Majority Cluster",
@@ -39,7 +39,7 @@
     "numpy": "2.5.2"
   },
   "old-on": {
-    "input": "E:\\ComfyUI\\output\\video\\MiniMax_H3_00008_.mp4",
+    "input": "output\\video\\MiniMax_H3_00008_.mp4",
     "input_sha256": "e5cb19e1eff265b20df12b1c69d57876374d0300b5807bdd422d236445db05c5",
     "parameters": {
       "sampling": "Majority Cluster",
@@ -78,7 +78,7 @@
     "numpy": "2.5.2"
   },
   "new-off": {
-    "input": "E:\\ComfyUI\\output\\video\\MiniMax_H3_00008_.mp4",
+    "input": "output\\video\\MiniMax_H3_00008_.mp4",
     "input_sha256": "e5cb19e1eff265b20df12b1c69d57876374d0300b5807bdd422d236445db05c5",
     "parameters": {
       "sampling": "Robust Cell",
@@ -116,7 +116,7 @@
     "numpy": "2.5.2"
   },
   "new-on": {
-    "input": "E:\\ComfyUI\\output\\video\\MiniMax_H3_00008_.mp4",
+    "input": "output\\video\\MiniMax_H3_00008_.mp4",
     "input_sha256": "e5cb19e1eff265b20df12b1c69d57876374d0300b5807bdd422d236445db05c5",
     "parameters": {
       "sampling": "Robust Cell",
@@ -154,7 +154,7 @@
     "numpy": "2.5.2"
   },
   "clip09-on": {
-    "input": "E:\\ComfyUI\\output\\video\\MiniMax_H3_00009_.mp4",
+    "input": "output\\video\\MiniMax_H3_00009_.mp4",
     "input_sha256": "d1c38315b6eb66622f738c81a6c8a15eddde295a75c8e5add4de6ec20cb06388",
     "parameters": {
       "sampling": "Robust Cell",
@@ -192,7 +192,7 @@
     "numpy": "2.5.2"
   },
   "base-on": {
-    "input": "E:\\ComfyUI\\output\\h3_t2v_base_00001_.mp4",
+    "input": "output\\h3_t2v_base_00001_.mp4",
     "input_sha256": "1268750f77f46d70204b5842fb30350480f28bea0fa03f1e93caeb5afa1cc9dd",
     "parameters": {
       "sampling": "Robust Cell",
@@ -230,7 +230,7 @@
     "numpy": "2.5.2"
   },
   "auto": {
-    "input": "E:\\ComfyUI\\output\\video\\MiniMax_H3_00008_.mp4",
+    "input": "output\\video\\MiniMax_H3_00008_.mp4",
     "input_sha256": "e5cb19e1eff265b20df12b1c69d57876374d0300b5807bdd422d236445db05c5",
     "parameters": {
       "sampling": "Robust Cell",

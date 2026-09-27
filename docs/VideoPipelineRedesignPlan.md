@@ -18,7 +18,7 @@
 
 ## 2. 实查证据与结论边界
 
-实际目录为 `E:\ComfyUI\output`，用户所写的 `outputs` 不存在。本轮检查文件元数据，解码并抽查了以下四个视频的第 0、3、12、24、40、55 帧（均为零基索引），没有将抽帧检查冒充完整实时播放验收。
+实际目录为 ComfyUI 的 `output`，用户所写的 `outputs` 不存在。本轮检查文件元数据，解码并抽查了以下四个视频的第 0、3、12、24、40、55 帧（均为零基索引），没有将抽帧检查冒充完整实时播放验收。
 
 | 联系表行号 | 文件（相对 output） | 分辨率 | 帧数 / 帧率 |
 |---|---|---|---|
@@ -39,7 +39,7 @@
 - [helper-proof.json](video-review-2026-09-26/helper-proof.json)：现有时序纯函数的最小复现。
 - [baseline.json](video-review-2026-09-26/baseline.json)：本次代码和四个视频 SHA-256，用于锁定审查基线。
 
-本轮没有执行整套 ComfyUI 节点测试。`E:\ComfyUI\.venv\Scripts\python.exe` 无法启动其引用的 Python；改用本机 `C:\Users\L\miniconda3\python.exe` 完成 OpenCV 解码、NumPy 纯函数验证和证据输出。运行环境问题不能被写成节点测试通过。
+本轮没有执行整套 ComfyUI 节点测试。ComfyUI 的 venv 解释器无法启动其引用的 Python；改用另一个本机 Python 环境完成 OpenCV 解码、NumPy 纯函数验证和证据输出。运行环境问题不能被写成节点测试通过。
 
 ## 3. 根因分层
 
