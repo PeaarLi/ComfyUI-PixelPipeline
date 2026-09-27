@@ -2,7 +2,8 @@
 
 Turn AI-generated "fake pixel art" into **real** pixel art: detect (or force) the
 pixel grid, resample one colour per cell, optionally quantise to a shared
-palette, then export at a crisp integer scale.
+palette, then export at a crisp integer scale. A separate two-node branch
+cleans animation frames and packs them into a game-ready sprite sheet.
 
 Built on the **V3 node schema** (`comfy_api.latest`), so nodes are declared with
 `io.Schema` / `define_schema` rather than the legacy `INPUT_TYPES` dict.
@@ -16,6 +17,8 @@ Built on the **V3 node schema** (`comfy_api.latest`), so nodes are declared with
 | 2. Palette extract | `PixelPaletteExtract` | [`docs/PixelPaletteExtract.md`](docs/PixelPaletteExtract.md) |
 | 3. Palette apply | `PixelPaletteApply` | [`docs/PixelPaletteApply.md`](docs/PixelPaletteApply.md) |
 | 4. Export scale | `PixelExportScale` | [`docs/PixelExportScale.md`](docs/PixelExportScale.md) |
+| 5. Sprite prepare | `PixelSpritePrepare` | [`docs/PixelSpritePrepare.md`](docs/PixelSpritePrepare.md) |
+| 6. Sprite sheet | `PixelSpriteSheet` | [`docs/PixelSpriteSheet.md`](docs/PixelSpriteSheet.md) |
 
 ## Pipeline
 
@@ -29,6 +32,12 @@ IMAGE
   │         └─► [PixelPaletteApply] ◄────────────────────┘   (optional)
   │                   │
   └───────────────────┴──► [PixelExportScale] ──► IMAGE + width + height
+
+IMAGE (frame batch)
+  │
+  └─► [PixelSpritePrepare] ──► images (aligned, background keyed) + bg_color   (optional)
+            │
+            └─► [PixelSpriteSheet] ──► sheet + columns + rows + cell_width + cell_height
 
 VIDEO
   │
@@ -90,7 +99,7 @@ ComfyUI Manager installs `requirements.txt` automatically.
 
 ## Finding the nodes in the node library
 
-The five nodes live under **`图像 / 像素管线`** (`image/pixel pipeline`). They also
+The seven nodes live under **`图像 / 像素管线`** (`image/pixel pipeline`). They also
 show up under the **Extensions** source group, because custom nodes are always
 classified by `python_module`, never by category — using a core-looking category
 does **not** fold a pack into the built-in "Comfy" group.
@@ -111,21 +120,22 @@ nodeSearchService.ts:99    return results.slice(0, options.limit)
 
 The truncation happens **after** filtering, and the result order is the raw
 `/object_info` dictionary order — all core nodes first, all custom nodes last.
-**255** nodes accept an `IMAGE` input and this pack's nodes rank **251st**, so the
-64-slot cut-off is filled entirely by core nodes. The first custom node with an
-`IMAGE` input ranks 128th, i.e. it is also cut. Raising the limit or reordering
-the pack changes nothing.
+**307** nodes accept an `IMAGE` input and this pack's nodes rank **301st–306th**,
+so the 64-slot cut-off is filled entirely by core nodes. The first custom node
+with an `IMAGE` input is this pack's own `PixelGridRestore` at 301st, i.e. every
+custom node is cut. Raising the limit or reordering the pack changes nothing.
+(Numbers measured headlessly with `tools/measure_image_nodes.py`.)
 
 **Workaround — type text as well as ticking the filter.** With a non-empty query
 the results come from Fuse relevance ranking, the hit count drops far below 64,
-and nothing gets truncated. Typing `pixel` with `IMAGE` ticked lists all four of
+and nothing gets truncated. Typing `pixel` with `IMAGE` ticked lists all six of
 the pack's `IMAGE`-input nodes.
 
 `PixelVideoGridRestore` takes a **`VIDEO`** input rather than an `IMAGE` one, so
-it does not change the counts above (the pack still has the same four
-`IMAGE`-input nodes). But the same truncation applies if you tick `VIDEO` — a
-custom node with a `VIDEO` input may simply not be listed — and the workaround is
-identical: type text in the search box as well as ticking the filter.
+it does not change the counts above (the pack has six `IMAGE`-input nodes either
+way). But the same truncation applies if you tick `VIDEO` — a custom node with a
+`VIDEO` input may simply not be listed — and the workaround is identical: type
+text in the search box as well as ticking the filter.
 
 The real fix belongs upstream: filtering should not truncate, or the limit should
 only apply to unfiltered searches.
@@ -280,6 +290,36 @@ is offered — any interpolating filter would undo the grid restore.
 
 Full reference: [`docs/PixelExportScale.md`](docs/PixelExportScale.md).
 
+### `PixelSpritePrepare`
+
+`IMAGE -> images (IMAGE), bg_color (STRING)`
+
+Cleans a frame batch for sprite-sheet packing, ported from the local
+`webm2spritesheet.py` tool: the background colour is detected from the first
+frame's 2 px border ring, every frame is cropped to **one shared centred
+square** around the union of all content boxes (the animation keeps its
+registration instead of swimming inside per-frame crops), and background
+regions **connected to the frame border** are flood-keyed to transparency —
+enclosed same-coloured islands inside the character survive, which is the
+difference from a plain colour key. `remove_background=False` gives the
+crop-only "noclean" variant. Like the reference, it assumes a **flat**
+background — a gradient or textured AI background varies more than any safe
+tolerance, so flatten those upstream first.
+
+Full reference: [`docs/PixelSpritePrepare.md`](docs/PixelSpritePrepare.md).
+
+### `PixelSpriteSheet`
+
+`IMAGE -> sheet (IMAGE), columns, rows, cell_width, cell_height`
+
+Packs a batch of same-sized frames into one sprite sheet, row-major, as a pure
+pixel copy (no resampling, no quantisation). `Auto Square` picks
+`columns = ceil(sqrt(n))`; `Fixed Columns` fixes the row width. Trailing cells
+stay empty — transparent in RGBA, black in RGB. The `cell_width` / `cell_height`
+outputs are Unity's *Grid By Cell Size* values.
+
+Full reference: [`docs/PixelSpriteSheet.md`](docs/PixelSpriteSheet.md).
+
 ## Video caveats
 
 Most of what follows comes from how ComfyUI encodes and loads a `VIDEO` rather
@@ -348,7 +388,9 @@ The palette nodes are reproducible by construction:
 
 `_selftest.py` asserts byte-identical output for two consecutive runs of both
 palette nodes, and for `PixelVideoGridRestore`'s whole output batch — the second
-one fails without the sampler seed.
+one fails without the sampler seed. The sprite nodes contain no RNG at all
+(numpy/torch copies and `scipy` labelling only), so they are byte-identical by
+construction; the selftest pins that too.
 
 ## Dependencies and licensing
 
@@ -391,6 +433,8 @@ chunk invariance, alpha through either route, exact frame rate and video encodin
 Frontend migration fixtures run with `node tests/test_video_migration.mjs`.
 `tools/verify_video.py` generates real-video comparisons and performance reports
 with input/code hashes; use the ComfyUI Python environment.
+`tools/measure_image_nodes.py` re-measures the node-library counts quoted in
+[the frontend-bug section](#known-frontend-bug-the-inputoutput-type-filters-hide-every-custom-node).
 
 Beyond the grid checks, it covers the palette nodes:
 
@@ -426,6 +470,21 @@ Beyond the grid checks, it covers the palette nodes:
   `PixelPaletteExtract` into the *initial* execution block;
 - **determinism** — identical hex and byte-identical output tensors across two
   runs, for every method in both colour spaces.
+
+And the sprite nodes:
+
+- exact schema comparison for both, including the `layout` DynamicCombo:
+  `Auto Square` first (option order is the only default lever), `columns` only
+  under `Fixed Columns`, and schema defaults equal to the module constants;
+- **the `layout` runtime contract**, driven through the same `comfy_api`
+  internals `execution.py` uses — including the zero-nested-option edge, a
+  missing `layout` behaving as Auto Square, and a bogus one raising;
+- **behaviour against hand-computed reference numbers**: background detection
+  and the shared square crop, border-only flood keying (an enclosed
+  background-coloured island survives), the no-content full-frame fallback,
+  RGBA composition, auto/fixed layouts (including `columns > n`), row-major
+  placement, zeroed trailing cells, channel preservation, the prepare→sheet
+  chain, and determinism.
 
 It also writes comparison images to `output/pixel_verify_*.png`
 (`pixel_verify_A_compare.png` is a four-panel sheet:
@@ -485,3 +544,15 @@ Omitting `grid_mode` entirely behaves as `Auto Detect` with the schema defaults.
 Note this is **not** backwards compatible with the old flat form
 (`{"grid_mode": "By Grid Count", "grid_w": 125}`), which no longer matches any
 input.
+
+`PixelSpriteSheet`'s `layout` is a `DynamicCombo` too:
+
+```jsonc
+// Auto Square
+{"layout": "Auto Square"}
+
+// Fixed Columns
+{"layout": "Fixed Columns", "layout.columns": 8}
+```
+
+Omitting `layout` behaves as `Auto Square`.

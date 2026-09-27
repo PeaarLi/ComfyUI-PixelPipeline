@@ -294,5 +294,77 @@
         "tooltip": "结果的像素高度（= 输入高 * scale）。"
       }
     }
+  },
+  "PixelSpritePrepare": {
+    "display_name": "像素精灵图准备",
+    "description": "把一批动画帧清理干净，供「像素精灵表」打包：从首帧四边 2px 采样检测背景色，取所有帧内容包围盒的并集，对整批只做一次居中方形裁剪（保持帧间对位，动画不会「游动」），并可选择把与背景色相近且连通到图像边缘的像素泛洪抠成透明；被内容完全包围的同色内部区域不受影响。移植自 webm2spritesheet.py 的清理阶段。",
+    "inputs": {
+      "image": {
+        "name": "图像",
+        "tooltip": "动画帧批次，RGB 或 RGBA，所有帧同尺寸。背景色只从第一帧的四边采样（与参考脚本一致），请保证第 0 帧的背景有代表性。"
+      },
+      "color_tolerance": {
+        "name": "颜色容差",
+        "tooltip": "判定背景像素的容差：逐通道 RGB 差值之和不超过该值即视为背景。默认 12，与参考脚本一致。调大可吞掉背景上的轻微噪点；0 只抠精确匹配。"
+      },
+      "padding_ratio": {
+        "name": "余量比例",
+        "tooltip": "裁剪方形相对内容尺寸的余量：边长 = max(内容宽, 内容高) + 2 * max(round(边长 * 比例), 2)。最小余量固定为 2 px。裁剪框按整批内容并集只算一次，因此帧间对位保持不变。"
+      },
+      "remove_background": {
+        "name": "抠除背景",
+        "tooltip": "开启时，与检测背景色相近且与（裁剪后）图像边缘连通的像素置为透明（alpha=0）；与边缘不连通的同色内部像素保留——这就是它和普通抠色（colour key）的区别。关闭时只做检测与统一裁剪，不产生 alpha。"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "图像",
+        "tooltip": "裁剪（并可选抠除背景）后的帧批次。发生抠除或输入本身带真实透明时为 RGBA，否则为 RGB——全不透明的 alpha 会被丢弃（按整批判断）。"
+      },
+      "1": {
+        "name": "背景色",
+        "tooltip": "检测到的背景色，大写 #RRGGBB 文本，供检查或记录。"
+      }
+    }
+  },
+  "PixelSpriteSheet": {
+    "display_name": "像素精灵表",
+    "description": "把一批同尺寸帧按行优先拼成一张精灵表大图。'Auto Square' 取列数 ceil(sqrt(帧数)) 的近方形布局（参考脚本的布局），'Fixed Columns' 固定列数。尾部多余的格子留空（RGB 为黑、RGBA 为透明）。纯像素拷贝，不重采样、不量化。",
+    "inputs": {
+      "image": {
+        "name": "图像",
+        "tooltip": "同尺寸帧批次，RGB 或 RGBA。通常接「像素精灵图准备」的输出，这样每格已经是统一的居中方形裁剪。"
+      },
+      "layout": {
+        "name": "布局",
+        "tooltip": "网格如何确定，只显示当前选中布局的控件。'Auto Square' = 列数 ceil(sqrt(n))、行数 ceil(n/列数)，最接近方形；'Fixed Columns' = 固定列数，行数按帧数推算。'Auto Square' 排在第一位，因此就是默认布局。"
+      },
+      "layout_columns": {
+        "name": "列数",
+        "tooltip": "固定的网格列数。行数 = ceil(帧数 / 列数)。列数大于帧数时只有一行，尾部格子留空。"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "精灵表",
+        "tooltip": "拼好的精灵表，[1, 行*H, 列*W, C]，通道数与输入一致。尾部空格全为零：RGB 为黑，RGBA 为透明。"
+      },
+      "1": {
+        "name": "列数",
+        "tooltip": "实际网格列数。"
+      },
+      "2": {
+        "name": "行数",
+        "tooltip": "实际网格行数。"
+      },
+      "3": {
+        "name": "单元格宽",
+        "tooltip": "每格宽度（= 输入帧宽），供 Unity 按格子尺寸（Grid By Cell Size）切片。"
+      },
+      "4": {
+        "name": "单元格高",
+        "tooltip": "每格高度（= 输入帧高），供 Unity 按格子尺寸（Grid By Cell Size）切片。"
+      }
+    }
   }
 }

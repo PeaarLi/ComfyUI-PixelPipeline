@@ -77,6 +77,18 @@ It checks, in order:
    as an exact ``Fraction``; VIDEO images being RGB with alpha in its own slot;
    frame identity, moving edges without trails, current-frame colour support,
    static noise reduction, alpha from either input route and chunk invariance.
+15. **Sprite node schema** -- ``PixelSpritePrepare``'s inputs/outputs and
+   ``PixelSpriteSheet``'s ``layout`` DynamicCombo: ``Auto Square`` first (the
+   default lever), ``columns`` only under ``Fixed Columns``, and schema defaults
+   equal to the module constants.
+16. **Sprite runtime contract** -- the ``layout`` combo driven through
+   ``comfy_api``'s own machinery (including the zero-nested-option edge), plus
+   ``_unpack_layout``'s None/bare-string shapes and the unknown-layout error.
+17. **Sprite node behaviour** -- synthetic batches only: background detection
+   and the shared square crop with hand-computed numbers, border-only flood
+   keying (interior same-coloured pixels survive), the no-content fallback,
+   RGBA composition, sheet layouts (auto / fixed / columns > n), row-major
+   placement, empty trailing cells, channel preservation and determinism.
 
 Comparison images are written to ``E:\\ComfyUI\\output\\pixel_verify_*.png``.
 No video file is written: the encode check uses an in-memory buffer.
@@ -175,7 +187,7 @@ def section_schema(module) -> list:
 
     extension = asyncio.run(module.comfy_entrypoint())
     node_list = asyncio.run(extension.get_node_list())
-    check("get_node_list() returns 5 nodes", len(node_list) == 5,
+    check("get_node_list() returns 7 nodes", len(node_list) == 7,
           f"{[c.__name__ for c in node_list]}")
 
     for node_cls in node_list:
@@ -1673,6 +1685,311 @@ def section_alpha(nodes: list) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# 15. Sprite node schemas
+# --------------------------------------------------------------------------- #
+def section_sprite_schema(nodes: list) -> None:
+    """Both sprite nodes' contracts; the sheet's layout DynamicCombo in particular."""
+    print("\n=== 15. sprite node schemas ===")
+    by_name = {c.__name__: c for c in nodes}
+    check("both sprite nodes are registered",
+          {"PixelSpritePrepare", "PixelSpriteSheet"} <= set(by_name), str(sorted(by_name)))
+    if not {"PixelSpritePrepare", "PixelSpriteSheet"} <= set(by_name):
+        return
+    from pixelpipe.nodes import sprite_prepare as sp
+    from pixelpipe.nodes import sprite_sheet as ss
+
+    ins, outs = _schema_rows(by_name["PixelSpritePrepare"].GET_SCHEMA())
+    check("prepare top-level input ids are exactly the contract",
+          [r["id"] for r in ins] == ["image", "color_tolerance", "padding_ratio",
+                                     "remove_background"],
+          str([r["id"] for r in ins]))
+    check("prepare top-level input types",
+          [r["type"] for r in ins] == ["IMAGE", "INT", "FLOAT", "BOOLEAN"],
+          str([r["type"] for r in ins]))
+    check("prepare defaults and ranges",
+          [(r["id"], r["default"], r["min"], r["max"]) for r in ins[1:]] == [
+              ("color_tolerance", 12, 0, 255),
+              ("padding_ratio", 0.05, 0.0, 1.0),
+              ("remove_background", True, None, None)],
+          str([(r["id"], r["default"], r["min"], r["max"]) for r in ins[1:]]))
+    check("prepare schema defaults equal the module constants",
+          ins[1]["default"] == sp.DEFAULT_COLOR_TOLERANCE
+          and ins[2]["default"] == sp.DEFAULT_PADDING_RATIO)
+    check("prepare constants match the reference script",
+          (sp.DEFAULT_COLOR_TOLERANCE, sp.DEFAULT_PADDING_RATIO, sp.PADDING_MIN_PX)
+          == (12, 0.05, 2),
+          str((sp.DEFAULT_COLOR_TOLERANCE, sp.DEFAULT_PADDING_RATIO, sp.PADDING_MIN_PX)))
+    check("prepare has no optional/lazy/advanced inputs",
+          not any(r["optional"] or r["lazy"] or r["advanced"] for r in ins))
+    check("prepare outputs are images + bg_color",
+          outs == [("images", "IMAGE"), ("bg_color", "STRING")], str(outs))
+
+    ins, outs = _schema_rows(by_name["PixelSpriteSheet"].GET_SCHEMA())
+    check("sheet top-level input ids are exactly the contract",
+          [r["id"] for r in ins] == ["image", "layout"], str([r["id"] for r in ins]))
+    check("sheet top-level input types",
+          [r["type"] for r in ins] == ["IMAGE", "COMFY_DYNAMICCOMBO_V3"],
+          str([r["type"] for r in ins]))
+    opts = _dynamic_options(by_name["PixelSpriteSheet"].GET_SCHEMA())
+    check("one DynamicCombo named layout with the two documented layouts",
+          list(opts) == ["layout"]
+          and list(opts["layout"]) == ["Auto Square", "Fixed Columns"],
+          str(list(opts.get("layout", {}))))
+    # DynamicCombo.Input has no `default` kwarg, so option order is the only
+    # lever (same pitfall as grid_mode). Pin it.
+    check("'Auto Square' is the FIRST option (that is what makes it the default)",
+          next(iter(opts["layout"])) == "Auto Square")
+    check("Auto Square carries no nested parameters",
+          opts["layout"]["Auto Square"] == [], str(opts["layout"]["Auto Square"]))
+    fixed = {r["id"]: r for r in opts["layout"]["Fixed Columns"]}
+    check("Fixed Columns carries only columns",
+          list(fixed) == ["columns"], str(list(fixed)))
+    check("columns is INT, schema default equals the module constant, with room to rise",
+          (fixed["columns"]["type"], fixed["columns"]["default"],
+           fixed["columns"]["min"], fixed["columns"]["max"])
+          == ("INT", ss.DEFAULT_COLUMNS, 1, 1024), str(fixed["columns"]))
+    check("no nested input is optional, lazy, or advanced",
+          not any(r["optional"] or r["lazy"] or r["advanced"]
+                  for mode in opts["layout"].values() for r in mode))
+    check("sheet outputs are sheet + grid metadata",
+          outs == [("sheet", "IMAGE"), ("columns", "INT"), ("rows", "INT"),
+                   ("cell_width", "INT"), ("cell_height", "INT")], str(outs))
+
+
+# --------------------------------------------------------------------------- #
+# 16. Sprite runtime contract
+# --------------------------------------------------------------------------- #
+def section_sprite_contract(nodes: list) -> None:
+    """The layout combo through ComfyUI's own machinery (mirrors 3g)."""
+    from comfy_api.latest import _io
+
+    print("\n=== 16. layout runtime contract (via comfy_api internals) ===")
+    by_name = {c.__name__: c for c in nodes}
+    if "PixelSpriteSheet" not in by_name:
+        _fail("PixelSpriteSheet is registered", str(sorted(by_name)))
+        return
+    from pixelpipe.nodes import sprite_sheet as ss
+
+    schema = by_name["PixelSpriteSheet"].GET_SCHEMA()
+    raw = _io.create_input_dict_v1(schema.inputs)
+    check("layout serialises as COMFY_DYNAMICCOMBO_V3",
+          raw["required"]["layout"][0] == "COMFY_DYNAMICCOMBO_V3",
+          str(raw["required"]["layout"][0]))
+
+    flat = {"layout": "Fixed Columns", "layout.columns": 4}
+    out, _missing, v3 = _io.get_finalized_class_inputs(raw, dict(flat))
+    built = _io.build_nested_inputs(dict(flat), v3)
+    got = built["layout"]
+    prefixed = {k.split(".", 1)[1] for k in out["required"] if k.startswith("layout.")}
+    print(f"      Fixed Columns -> {got}")
+    check("Fixed Columns: execute receives the selected key inside the input's own dict",
+          got.get("layout") == "Fixed Columns", str(got))
+    check("Fixed Columns: columns arrives alongside it",
+          {k: v for k, v in got.items() if k != "layout"} == {"columns": 4}, str(got))
+    check("Fixed Columns: exactly its parameters become required",
+          prefixed == {"columns"}, str(sorted(prefixed)))
+    check("Fixed Columns: _unpack_layout round-trips",
+          ss._unpack_layout(got) == ("Fixed Columns", got), str(ss._unpack_layout(got)))
+
+    flat = {"layout": "Auto Square"}
+    out, _missing, v3 = _io.get_finalized_class_inputs(raw, dict(flat))
+    built = _io.build_nested_inputs(dict(flat), v3)
+    got = built.get("layout")
+    prefixed = {k.split(".", 1)[1] for k in out["required"] if k.startswith("layout.")}
+    print(f"      Auto Square   -> {got}")
+    # An option with zero nested inputs has no documented runtime shape (the
+    # internals may hand back an empty dict); whatever arrives must unpack to
+    # the mode, and no nested key may become required.
+    check("Auto Square: whatever build_nested_inputs produces unpacks to Auto Square",
+          ss._unpack_layout(got)[0] == "Auto Square", str(got))
+    check("Auto Square: no nested parameters become required",
+          prefixed == set(), str(sorted(prefixed)))
+
+    check("a prompt with no layout at all behaves as Auto Square",
+          ss._unpack_layout(None)[0] == "Auto Square", str(ss._unpack_layout(None)))
+    check("a bare (unmatched) layout string is passed through for the caller to reject",
+          ss._unpack_layout("Nonsense")[0] == "Nonsense")
+
+    raised = None
+    try:
+        by_name["PixelSpriteSheet"].execute(image=None, layout="Nonsense")
+    except ValueError as exc:
+        raised = exc
+    except Exception as exc:  # noqa: BLE001
+        raised = exc
+    check("an unknown layout raises ValueError naming the layout",
+          isinstance(raised, ValueError) and "Nonsense" in str(raised),
+          f"{type(raised).__name__}: {raised}")
+
+
+# --------------------------------------------------------------------------- #
+# 17. Sprite node behaviour
+# --------------------------------------------------------------------------- #
+def _sprite_fixture():
+    """3 frames 24x24 RGB on a green background, one 4x4 red square each.
+
+    f0 rows 6-9 cols 4-7 | f1 rows 6-9 cols 10-13 | f2 rows 14-17 cols 8-11.
+    Union bbox (left 4, top 6, right 13, bottom 17); reference-script math:
+    content 9x11 -> raw 11, padding max(round(0.55), 2) = 2, crop 15, centre
+    (8.5, 11.5) -> window (left 1, top 4). Hand-computed, so the checks pin the
+    port against the reference script rather than against itself.
+    """
+    import numpy as np
+    import torch
+
+    frames = np.tile(np.array([10, 200, 30], np.uint8), (3, 24, 24, 1))
+    red = np.array([200, 30, 30], np.uint8)
+    frames[0, 6:10, 4:8] = red
+    frames[1, 6:10, 10:14] = red
+    frames[2, 14:18, 8:12] = red
+    return torch.from_numpy(frames).float() / 255.0
+
+
+def section_sprite_behaviour(nodes: list) -> None:
+    import numpy as np
+    import torch
+
+    print("\n=== 17. sprite node behaviour ===")
+    by_name = {c.__name__: c for c in nodes}
+    if not {"PixelSpritePrepare", "PixelSpriteSheet"} <= set(by_name):
+        _fail("both sprite nodes are registered", str(sorted(by_name)))
+        return
+    prepare = by_name["PixelSpritePrepare"]
+    sheet = by_name["PixelSpriteSheet"]
+    fixture = _sprite_fixture()
+
+    # -- 17a. default run: detection + shared square crop + keying
+    out, bg_hex = prepare.execute(image=fixture).result
+    u8 = _to_u8(out)
+    print(f"      prepare -> {tuple(out.shape)}, bg {bg_hex}")
+    check("17a crop is the hand-computed reference window", u8.shape == (3, 15, 15, 4),
+          str(u8.shape))
+    check("17a bg_color is the detected green, uppercase hex", bg_hex == "#0AC81E", bg_hex)
+    check("17a border-connected background is keyed out",
+          bool((u8[..., 3][:, 0, :] == 0).all() and (u8[..., 3][:, -1, :] == 0).all()
+               and (u8[..., 3][:, :, 0] == 0).all() and (u8[..., 3][:, :, -1] == 0).all()))
+    check("17a a content pixel stays opaque with its colour",
+          bool((u8[0, 2:6, 3:7, 3] == 255).all()
+               and (u8[0, 3, 4, :3] == [200, 30, 30]).all()),
+          str(u8[0, 3, 4]))
+    check("17a registration: frame 2's square lands at crop offset (7, 10)",
+          bool((u8[2, 10:14, 7:11, 3] == 255).all()))
+
+    # -- 17b. only border-connected background is keyed: an enclosed bg island survives
+    island = np.tile(np.array([10, 200, 30], np.uint8), (1, 24, 24, 1))
+    island[0, 8:16, 8:16] = [200, 30, 30]
+    island[0, 11:13, 11:13] = [10, 200, 30]  # bg-coloured, fully enclosed by red
+    out_i, _ = prepare.execute(
+        image=torch.from_numpy(island).float() / 255.0).result
+    i8 = _to_u8(out_i)
+    # content = red ring rows/cols 8-15 -> raw 7, padding 2, crop 11 at (6, 6).
+    check("17b crop is the hand-computed reference window", i8.shape == (1, 11, 11, 4),
+          str(i8.shape))
+    check("17b the enclosed background island keeps its alpha",
+          bool((i8[0, 5:7, 5:7, 3] == 255).all()), str(i8[0, 5:7, 5:7, 3]))
+    check("17b the outer background is keyed out", bool(i8[0, 0, 0, 3] == 0))
+
+    # -- 17c. remove_background=False crops but creates no alpha (noclean variant)
+    out_c, _ = prepare.execute(image=fixture, remove_background=False).result
+    check("17c keying off keeps RGB, same crop", tuple(out_c.shape) == (3, 15, 15, 3),
+          str(tuple(out_c.shape)))
+
+    # -- 17d. no content anywhere: full-frame fallback, and keying erases everything
+    empty = torch.from_numpy(np.tile(np.array([10, 200, 30], np.uint8), (2, 24, 24, 1))).float() / 255.0
+    out_e, _ = prepare.execute(image=empty).result
+    check("17d no content falls back to the full frame",
+          tuple(out_e.shape) == (2, 24, 24, 4), str(tuple(out_e.shape)))
+    check("17d an all-background batch keys fully transparent",
+          bool((_to_u8(out_e)[..., 3] == 0).all()))
+    out_e2, _ = prepare.execute(image=empty, remove_background=False).result
+    check("17d no content with keying off is a full-frame RGB pass-through",
+          tuple(out_e2.shape) == (2, 24, 24, 3)
+          and torch.equal(out_e2, empty[..., :3]))
+
+    # -- 17e. RGBA: the alpha mask drives the content box; keying composes onto it
+    rgba = np.tile(np.array([10, 200, 30, 0], np.uint8), (2, 24, 24, 1))
+    rgba[0, 6:10, 4:8, 3] = 255
+    rgba[1, 6:10, 12:16, 3] = 255
+    rgba[0, 7:9, 5:7, :3] = [200, 30, 30]
+    rgba[1, 7:9, 13:15, :3] = [200, 30, 30]
+    out_r, _ = prepare.execute(image=torch.from_numpy(rgba).float() / 255.0).result
+    r8 = _to_u8(out_r)
+    # alpha-marked union (left 4, top 6, right 15, bottom 9) -> content 11x3,
+    # raw 11, padding 2, crop 15; centre (9.5, 7.5) -> left 2, top round(0.5)=0.
+    print(f"      prepare(RGBA) -> {tuple(out_r.shape)}")
+    check("17e the alpha mask drives the content box", r8.shape == (2, 15, 15, 4),
+          str(r8.shape))
+    check("17e the red cores survive opaque",
+          bool((r8[0, 7:9, 3:5, 3] == 255).all() and (r8[1, 7:9, 11:13, 3] == 255).all()),
+          f"{r8[0, 7, 3]} / {r8[1, 7, 11]}")
+    check("17e bg-coloured pixels inside the alpha block are still keyed",
+          bool(r8[0, 6, 2, 3] == 0))
+
+    # -- 17f. empty batch raises on both nodes
+    for node, kwargs in ((prepare, {"image": torch.zeros((0, 8, 8, 3))}),
+                         (sheet, {"image": torch.zeros((0, 8, 8, 3)), "layout": None})):
+        raised = None
+        try:
+            node.execute(**kwargs)
+        except ValueError as exc:
+            raised = exc
+        check(f"17f {node.__name__} raises on an empty batch",
+              isinstance(raised, ValueError), f"{type(raised).__name__ if raised else None}")
+
+    # -- 17g. sheet, Auto Square: 5 frames -> 3 cols x 2 rows, row-major, zeros behind
+    frames = torch.stack([torch.full((8, 8, 3), (i + 1) * 40 / 255.0) for i in range(5)])
+    out_s, cols, rows, cw, ch = sheet.execute(image=frames, layout=None).result
+    print(f"      sheet(auto, 5) -> {tuple(out_s.shape)} {cols}x{rows}")
+    check("17g auto layout is the near-square reference grid",
+          (cols, rows, cw, ch) == (3, 2, 8, 8), str((cols, rows, cw, ch)))
+    check("17g sheet shape is rows*H x cols*W", tuple(out_s.shape) == (1, 16, 24, 3),
+          str(tuple(out_s.shape)))
+    check("17g placement is row-major",
+          bool((out_s[0, 0:8, 8:16] == frames[1]).all()
+               and (out_s[0, 8:16, 0:8] == frames[3]).all()))
+    check("17g the trailing cell stays zero", bool((out_s[0, 8:16, 16:24] == 0).all()))
+
+    # -- 17h. sheet, Fixed Columns, including columns > n
+    out_s, cols, rows, _, _ = sheet.execute(
+        image=frames, layout={"layout": "Fixed Columns", "columns": 2}).result
+    check("17h fixed columns wraps after exactly that many",
+          (cols, rows) == (2, 3) and tuple(out_s.shape) == (1, 24, 16, 3),
+          str((cols, rows, tuple(out_s.shape))))
+    out_s, cols, rows, _, _ = sheet.execute(
+        image=frames, layout={"layout": "Fixed Columns", "columns": 8}).result
+    check("17h more columns than frames is honoured (one row, trailing zeros)",
+          (cols, rows) == (8, 1) and tuple(out_s.shape) == (1, 8, 64, 3)
+          and bool((out_s[0, :, 40:] == 0).all()),
+          str((cols, rows, tuple(out_s.shape))))
+
+    # -- 17i. channels survive; a single frame is a 1x1 pass-through
+    rgba5 = torch.stack([torch.full((8, 8, 4), (i + 1) * 40 / 255.0) for i in range(5)])
+    out_s, *_ = sheet.execute(image=rgba5, layout=None).result
+    check("17i RGBA stays RGBA, trailing alpha transparent",
+          tuple(out_s.shape) == (1, 16, 24, 4) and bool((out_s[0, 8:16, 16:24, 3] == 0).all()),
+          str(tuple(out_s.shape)))
+    out_s, cols, rows, _, _ = sheet.execute(image=frames[:1], layout=None).result
+    check("17i one frame is a 1x1 pass-through",
+          (cols, rows) == (1, 1) and torch.equal(out_s[0], frames[0]))
+
+    # -- 17j. the two nodes chain: prepare's frames become the sheet's cells
+    out_p, _ = prepare.execute(image=fixture).result
+    out_s, cols, rows, cw, ch = sheet.execute(image=out_p, layout=None).result
+    check("17j prepare -> sheet chains with the cell size carried through",
+          (cols, rows, cw, ch) == (2, 2, 15, 15) and tuple(out_s.shape) == (1, 30, 30, 4),
+          str((cols, rows, cw, ch, tuple(out_s.shape))))
+
+    # -- 17k. determinism
+    out1, bg1 = prepare.execute(image=fixture).result
+    out2, bg2 = prepare.execute(image=fixture).result
+    s1 = sheet.execute(image=frames, layout=None).result
+    s2 = sheet.execute(image=frames, layout=None).result
+    check("17k both nodes are deterministic",
+          torch.equal(out1, out2) and bg1 == bg2 and torch.equal(s1[0], s2[0])
+          and s1[1:] == s2[1:])
+
+
+# --------------------------------------------------------------------------- #
 def main() -> int:
     # The failure message is bilingual; force UTF-8 so a cp936 console does not
     # mangle it into question marks.
@@ -1728,6 +2045,14 @@ def main() -> int:
     except Exception:
         traceback.print_exc()
         _fail("alpha/RGBA section crashed", "see traceback above")
+    for name, fn in (("sprite schema", section_sprite_schema),
+                     ("sprite runtime contract", section_sprite_contract),
+                     ("sprite behaviour", section_sprite_behaviour)):
+        try:
+            fn(nodes)
+        except Exception:
+            traceback.print_exc()
+            _fail(f"{name} section crashed", "see traceback above")
 
     print("\n=== summary ===")
     print(f"  checks: {CHECKS}  failures: {len(FAILURES)}")
