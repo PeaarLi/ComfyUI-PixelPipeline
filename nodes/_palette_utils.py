@@ -1,9 +1,8 @@
 """Shared palette machinery for the two palette nodes.
 
-``PixelPaletteExtract`` and ``PixelPaletteQuantize`` are two views of one
-algorithm: the quantizer either *derives* a palette (calling the extractor
-internally) or *applies* a caller-supplied one. Keeping the derivation here
-means the two nodes can never drift apart.
+``PixelPaletteExtract`` chooses a palette and ``PixelPaletteApply`` applies one.
+Only the extractor derives anything; both live here so the derivation and the
+nearest-colour mapping it feeds cannot drift apart.
 
 Design notes
 ------------
@@ -24,9 +23,15 @@ offset by 128) -- **not** the standard 0-100 / +-128 Lab. All distances are plai
 squared-Euclidean in whichever 0-255 encoding is selected, so the two spaces are
 directly comparable in magnitude but not perceptually uniform.
 
-**PIL methods ignore ``space``.** ``Image.quantize`` has no Lab entry point, so
-median cut / max coverage / octree always cluster on RGB. Only the k-means
-methods and the final nearest-neighbour lookup honour ``space``.
+**``space`` reaches further than the clustering step.** ``Image.quantize`` has no
+Lab entry point, so median cut / max coverage / octree always *cluster* on RGB --
+but that is the only thing they get away with ignoring ``space`` for. The
+PIL-derived palettes are still merged across a batch in ``space``
+(:func:`_merge_blocks` converts them into it first), accent separation is
+measured in ``space`` (:func:`_append_accents`), and the per-entry pixel counts
+that drive the ``Frequency`` sort are computed in ``space``
+(:func:`palette_counts`). So a batched or accent-protected run produces
+different output for the same PIL method when ``space`` changes.
 
 **Batches.** All functions take ``[B, H, W, 3]``. When ``B > 1`` the per-image
 palettes are pooled and re-clustered into a single shared palette, so one call
@@ -46,15 +51,12 @@ except ImportError:  # pragma: no cover
 from PIL import Image
 
 __all__ = [
-    "MISSING",
     "PER_TILE",
     "GLOBAL_KMEANS",
     "MEDIAN_CUT",
     "MAX_COVERAGE",
     "OCTREE",
-    "FIXED_PALETTE",
     "EXTRACT_METHODS",
-    "QUANTIZE_METHODS",
     "SPACE_OPTIONS",
     "SORT_OPTIONS",
     "DITHER_OPTIONS",
@@ -69,14 +71,6 @@ __all__ = [
 ]
 
 # --------------------------------------------------------------------------- #
-# Sentinel
-# --------------------------------------------------------------------------- #
-#: Distinguishes "input not wired at all" (the key is absent from the kwargs, so
-#: the Python default applies) from "wired but not evaluated yet" (ComfyUI passes
-#: ``None``). Same trick as ``comfy_extras/nodes_logic.py``.
-MISSING = object()
-
-# --------------------------------------------------------------------------- #
 # Public vocabularies (node-facing labels)
 # --------------------------------------------------------------------------- #
 PER_TILE = "Per-Tile k-means"
@@ -84,15 +78,12 @@ GLOBAL_KMEANS = "Global k-means (Lab)"
 MEDIAN_CUT = "Median Cut"
 MAX_COVERAGE = "Max Coverage"
 OCTREE = "Octree"
-FIXED_PALETTE = "Fixed Palette (nearest)"
 
-#: Methods that *produce* a palette. ``FIXED_PALETTE`` is deliberately absent:
-#: applying a palette you already have is not a way to extract one, so
-#: ``PixelPaletteExtract`` must not offer it as a dead dropdown entry.
-_EXTRACTOR_METHODS = [PER_TILE, GLOBAL_KMEANS, MEDIAN_CUT, MAX_COVERAGE, OCTREE]
-EXTRACT_METHODS = list(_EXTRACTOR_METHODS)
-#: Methods ``PixelPaletteQuantize`` accepts (the extractors, plus "apply this one").
-QUANTIZE_METHODS = list(_EXTRACTOR_METHODS) + [FIXED_PALETTE]
+#: Every method here *produces* a palette, which is all ``PixelPaletteExtract``
+#: ever does. There is deliberately no "apply a palette I already have" entry:
+#: that is ``PixelPaletteApply``'s entire job, and offering it as a dropdown
+#: value would make one of the two nodes' inputs silently inert.
+EXTRACT_METHODS = [PER_TILE, GLOBAL_KMEANS, MEDIAN_CUT, MAX_COVERAGE, OCTREE]
 
 SPACE_OPTIONS = ["Lab", "RGB"]
 SORT_OPTIONS = ["Luminance", "Hue", "Frequency"]
@@ -131,10 +122,10 @@ TILE_K_MIN = 2
 #: Per-tile loop is bounded: ``tile_size`` is doubled until the tile count fits.
 MAX_TILES = 4096
 
-#: Tile size used by ``PixelPaletteExtract``. Its input list is fixed at
-#: image/colors/method/space/sort, so the per-tile window cannot be exposed as a
-#: widget there the way ``PixelPaletteQuantize`` exposes it. See the module
-#: docstring of ``palette.py`` for the reasoning.
+#: Default tile size for ``PixelPaletteExtract``. Only a default: the node
+#: exposes the window as its advanced ``tile_size`` input. Note it is measured in
+#: pixels *of that node's input image*, so the right value depends on whether it
+#: is fed the generator's raw output or an already grid-restored image.
 EXTRACT_TILE_SIZE = 16
 
 #: Accent protection.
@@ -217,7 +208,7 @@ def _parse_hex_token(token: str, where: str) -> tuple[int, int, int]:
         body = "".join(c * 2 for c in body)
     if len(body) != 6 or not all(c in _HEX_CHARS for c in body):
         raise ValueError(
-            f"PixelPaletteQuantize: {where} 无法解析为 HEX 颜色 (cannot parse as a HEX colour): "
+            f"PixelPaletteApply: {where} 无法解析为 HEX 颜色 (cannot parse as a HEX colour): "
             f"{token!r}. Expected #RRGGBB (or RRGGBB / #RGB), one colour per line or comma separated."
         )
     return int(body[0:2], 16), int(body[2:4], 16), int(body[4:6], 16)
@@ -410,7 +401,7 @@ def _pil_palette(rgb: np.ndarray, k: int, pil_method: int) -> tuple[np.ndarray, 
     """``Image.quantize`` -> ``(palette_u8 [K,3], counts [K])``.
 
     ``dither=NONE`` on purpose: dithering is a separate, explicit stage in
-    ``PixelPaletteQuantize`` and must never be baked into extraction.
+    ``PixelPaletteApply`` and must never be baked into extraction.
     """
     k = int(max(1, min(256, k)))
     image = Image.fromarray(np.ascontiguousarray(rgb, dtype=np.uint8), "RGB")
@@ -721,7 +712,7 @@ def _floyd_steinberg(rgb: np.ndarray, palette: np.ndarray) -> np.ndarray:
     """
     k = palette.shape[0]
     if k == 0:
-        raise ValueError("PixelPaletteQuantize: empty palette.")
+        raise ValueError("PixelPaletteApply: empty palette.")
     palette = palette.reshape(-1, 3).astype(np.uint8)
     image = Image.fromarray(np.ascontiguousarray(rgb, dtype=np.uint8), "RGB")
     holder = Image.new("P", (1, 1))

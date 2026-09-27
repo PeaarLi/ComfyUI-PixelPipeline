@@ -1,0 +1,134 @@
+[
+  {
+    "file": "E:\\ComfyUI\\output\\video\\MiniMax_H3_00008_.mp4",
+    "frames": 56,
+    "width": 736,
+    "height": 736,
+    "fps": 24.0,
+    "samples": [
+      {
+        "frame": 0,
+        "dark_fraction_rgbmax_lt50": 0.049293330576559546
+      },
+      {
+        "frame": 3,
+        "dark_fraction_rgbmax_lt50": 0.04644117733931947
+      },
+      {
+        "frame": 12,
+        "dark_fraction_rgbmax_lt50": 0.04591505198487713
+      },
+      {
+        "frame": 24,
+        "dark_fraction_rgbmax_lt50": 0.04284875649810964
+      },
+      {
+        "frame": 40,
+        "dark_fraction_rgbmax_lt50": 0.04306474480151229
+      },
+      {
+        "frame": 55,
+        "dark_fraction_rgbmax_lt50": 0.04782756379962193
+      }
+    ]
+  },
+  {
+    "file": "E:\\ComfyUI\\output\\h3_08_ps3_nopal_tw0.mp4",
+    "frames": 56,
+    "width": 1452,
+    "height": 1464,
+    "fps": 24.0,
+    "samples": [
+      {
+        "frame": 0,
+        "dark_fraction_rgbmax_lt50": 0.05013858781556248
+      },
+      {
+        "frame": 3,
+        "dark_fraction_rgbmax_lt50": 0.04350227310361438
+      },
+      {
+        "frame": 12,
+        "dark_fraction_rgbmax_lt50": 0.045867580424212316
+      },
+      {
+        "frame": 24,
+        "dark_fraction_rgbmax_lt50": 0.043341387044814765
+      },
+      {
+        "frame": 40,
+        "dark_fraction_rgbmax_lt50": 0.04298856674042963
+      },
+      {
+        "frame": 55,
+        "dark_fraction_rgbmax_lt50": 0.04792569886645893
+      }
+    ]
+  },
+  {
+    "file": "E:\\ComfyUI\\output\\h3_08_nopal_ps3.mp4",
+    "frames": 56,
+    "width": 1452,
+    "height": 1464,
+    "fps": 24.0,
+    "samples": [
+      {
+        "frame": 0,
+        "dark_fraction_rgbmax_lt50": 0.05363197925604781
+      },
+      {
+        "frame": 3,
+        "dark_fraction_rgbmax_lt50": 0.09334778485300095
+      },
+      {
+        "frame": 12,
+        "dark_fraction_rgbmax_lt50": 0.10485160848424634
+      },
+      {
+        "frame": 24,
+        "dark_fraction_rgbmax_lt50": 0.06265571136100197
+      },
+      {
+        "frame": 40,
+        "dark_fraction_rgbmax_lt50": 0.0614937564918936
+      },
+      {
+        "frame": 55,
+        "dark_fraction_rgbmax_lt50": 0.048372134158274245
+      }
+    ]
+  },
+  {
+    "file": "E:\\ComfyUI\\output\\h3_08_pixel_ps3.mp4",
+    "frames": 56,
+    "width": 1452,
+    "height": 1464,
+    "fps": 24.0,
+    "samples": [
+      {
+        "frame": 0,
+        "dark_fraction_rgbmax_lt50": 0.054091116078821
+      },
+      {
+        "frame": 3,
+        "dark_fraction_rgbmax_lt50": 0.095003217721176
+      },
+      {
+        "frame": 12,
+        "dark_fraction_rgbmax_lt50": 0.10790185762242394
+      },
+      {
+        "frame": 24,
+        "dark_fraction_rgbmax_lt50": 0.06536866428818738
+      },
+      {
+        "frame": 40,
+        "dark_fraction_rgbmax_lt50": 0.0636873579310241
+      },
+      {
+        "frame": 55,
+        "dark_fraction_rgbmax_lt50": 0.04917797573348989
+      }
+    ]
+  }
+]

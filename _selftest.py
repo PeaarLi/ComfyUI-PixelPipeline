@@ -20,23 +20,66 @@ It checks, in order:
      (the capability the legacy V1 node did not have at all),
    - a smooth, non-pixel image must **raise** instead of being passed through,
    - ``PixelExportScale`` with ``scale=4`` must turn 125x122 into 500x488.
-4. **Palette schema** -- input/output names, types, defaults, ranges and the
-   ``optional`` / ``lazy`` markers of the two palette nodes.
+3f. **Grid schema** -- the ``grid_mode`` DynamicCombo: that the old flat inputs
+   are gone, that ``Auto Detect`` is the FIRST option (``DynamicCombo.Input`` has
+   no ``default`` kwarg, so option order is the only lever), that no nested input
+   is optional/lazy/advanced, and that every schema default equals its module
+   constant.
+3g. **Grid runtime contract** -- the shape ``execute`` actually receives for a
+   DynamicCombo, established by calling the same ``comfy_api`` functions
+   ``execution.py`` calls rather than by trusting a hand-written dict. Also
+   covers a missing ``grid_mode`` (behaves as Auto Detect) and a bogus one.
+3h. **``max_pixel_size`` port** -- the ported detector at the default ceiling must
+   match upstream ``detect_grid_scale`` on a corpus spanning every branch
+   (FFT accepted / gate-rejected / both detectors failed), and must resolve 32 px
+   cells that the default rejects. The 24 px aliasing case is pinned as a
+   *documented* quiet-wrong-answer, not a bug.
+4. **Palette schema** -- input/output names, types, defaults and ranges of both
+   palette nodes, including that ``PixelPaletteApply`` carries no derive-path
+   inputs and does not override ``check_lazy_status``.
+4b. **zh locale keys** -- the Chinese translation keys must equal what the
+   frontend will look up. Nested widgets are keyed ``<parent>_<nested>`` because
+   ``normalizeI18nKey`` turns the ``.`` in ``"<parent>.<nested>"`` into ``_``, and
+   a stale key set shows up as *blank* tooltips in the Vue renderer rather than
+   as an English fallback.
 5. **Palette extraction** -- 32 colours from ``fox_pixel_GRID.png``, and the HEX
    text parses back to exactly 32 distinct RGB triples.
 6. **Cross-image consistency** -- a palette taken from image A and applied to
    image B must leave B using a subset of A's colours.
-7. **Every method** -- all six quantize methods and all five extract methods run
-   and report what they produced.
+7. **Apply, both palette sources** -- a palette wired from Extract and a pasted
+   HEX literal must both work, ``applied_palette`` must come back verbatim with
+   order preserved (not re-sorted), and an empty palette must raise.
 8. **Dithering** -- ``None`` vs ``Bayer 4x4`` vs ``Floyd-Steinberg``; every
    dithered output must stay inside the palette, and Bayer thresholds must be a
    pure function of pixel coordinates (so they match across image sizes).
-9. **Lazy pruning** -- the real ``comfy_execution.graph.TopologicalSort`` must
-   leave ``PixelPaletteExtract`` out of the execution block when ``palette`` is
-   unwired, and include it when it is wired.
+9. **Graph dependency** -- the real ``comfy_execution.graph.TopologicalSort`` must
+   put ``PixelPaletteExtract`` in the *initial* execution block when the palette
+   is wired. This replaced a lazy-pruning check: the palette input is now an
+   ordinary required one, so the property worth defending is the mirror image.
 10. **Determinism** -- the same call twice must produce byte-identical output.
+9b. **Apply's validation through the real framework** -- drives
+   ``execution.validate_inputs`` for a wired / typed / empty palette. Only this
+   level of fidelity catches the bug it exists for: validation runs *before*
+   execution, so a linked input arrives as ``None``, and only the real call
+   reproduces that. It also pins that an empty palette yields exactly ONE error,
+   attributed to ``palette``.
+11. **Alpha / RGBA** -- a synthetic RGBA clip through the grid, quantise and
+   export stages: alpha must survive byte-identically and a hard mask must land
+   on the grid lines.
+12. **Video node schema** -- ``PixelVideoGridRestore``'s inputs, outputs, the
+   grid-mode default lever, and video-only sampling choices.
+13. **Video node runtime contract** -- its ``grid_mode`` driven through
+   ``comfy_api``'s own machinery, the same way as the still node's.
+14. **Video node behaviour** -- entirely from synthesised tensors; **no video
+   file is needed**, because ``VideoFromComponents`` builds from materialised
+   tensors and even encodes into an in-memory ``BytesIO``. Covers: one grid for
+   the whole clip with no raise on frame disagreement; the frame rate surviving
+   as an exact ``Fraction``; VIDEO images being RGB with alpha in its own slot;
+   frame identity, moving edges without trails, current-frame colour support,
+   static noise reduction, alpha from either input route and chunk invariance.
 
 Comparison images are written to ``E:\\ComfyUI\\output\\pixel_verify_*.png``.
+No video file is written: the encode check uses an in-memory buffer.
 
 Exit code is 0 only when every check passes.
 """
@@ -132,7 +175,7 @@ def section_schema(module) -> list:
 
     extension = asyncio.run(module.comfy_entrypoint())
     node_list = asyncio.run(extension.get_node_list())
-    check("get_node_list() returns 4 nodes", len(node_list) == 4,
+    check("get_node_list() returns 5 nodes", len(node_list) == 5,
           f"{[c.__name__ for c in node_list]}")
 
     for node_cls in node_list:
@@ -188,6 +231,16 @@ def _smooth_non_pixel_image(size: int = 512):
     return t.unsqueeze(0)
 
 
+def _mode(mode: str, **params) -> dict:
+    """The ``grid_mode`` value ComfyUI's build_nested_inputs() hands to execute.
+
+    Shape verified against this build (see ``section_grid_contract``): the
+    selected option's key arrives *inside* the input's own value, alongside that
+    option's nested widget values.
+    """
+    return {"grid_mode": {"grid_mode": mode, **params}}
+
+
 def section_behaviour(nodes: list, baseline: Path) -> None:
     import torch
     import torch.nn.functional as F
@@ -206,7 +259,7 @@ def section_behaviour(nodes: list, baseline: Path) -> None:
     img = _load_image(baseline)
     print(f"      input   : {tuple(img.shape)}")
     _img, gw, gh, px, det, conf = grid.execute(
-        image=img, sampling="Majority Cluster", grid_mode="Auto Detect"
+        image=img, sampling="Majority Cluster", **_mode("Auto Detect")
     ).result
     print(f"      output  : image={tuple(_img.shape)} grid_w={gw} grid_h={gh} "
           f"pixel_size={px!r} detected={det!r} confidence={conf:.3f}")
@@ -225,7 +278,7 @@ def section_behaviour(nodes: list, baseline: Path) -> None:
     # -- 3b. By Pixel Size: the capability V1 did not have -------------------
     print("\n  [3b] PixelGridRestore By Pixel Size (pixel_size=16) -- V1 could not do this")
     _img2, gw2, gh2, px2, det2, conf2 = grid.execute(
-        image=img, sampling="Median", grid_mode="By Pixel Size", pixel_size=16
+        image=img, sampling="Median", **_mode("By Pixel Size", pixel_size=16)
     ).result
     print(f"      requested grid_size=(64, 64) from round(1024/16)")
     print(f"      output  : image={tuple(_img2.shape)} grid_w={gw2} grid_h={gh2} "
@@ -242,7 +295,7 @@ def section_behaviour(nodes: list, baseline: Path) -> None:
     # -- 3b'. By Grid Count -------------------------------------------------
     print("\n  [3b'] PixelGridRestore By Grid Count (64x64)")
     _img3, gw3, gh3, px3, det3, conf3 = grid.execute(
-        image=img, sampling="Center Sample", grid_mode="By Grid Count", grid_w=64, grid_h=64
+        image=img, sampling="Center Sample", **_mode("By Grid Count", grid_w=64, grid_h=64)
     ).result
     print(f"      output  : image={tuple(_img3.shape)} grid_w={gw3} grid_h={gh3} "
           f"pixel_size={px3!r} detected={det3!r}")
@@ -256,7 +309,7 @@ def section_behaviour(nodes: list, baseline: Path) -> None:
     print(f"      input   : {tuple(smooth.shape)} (blurred linear ramp, no pixel grid)")
     raised = None
     try:
-        result = grid.execute(image=smooth, sampling="Median", grid_mode="Auto Detect")
+        result = grid.execute(image=smooth, sampling="Median", **_mode("Auto Detect"))
     except Exception as exc:  # noqa: BLE001 -- raising is exactly what we assert
         raised = exc
         print(f"      raised  : {type(exc).__name__}")
@@ -288,12 +341,12 @@ def section_behaviour(nodes: list, baseline: Path) -> None:
         else:
             for tag, one in (("a", img), ("b", img_b)):
                 _o, w1, h1, _p, _d, _c1 = grid.execute(
-                    image=one, sampling="Median", grid_mode="Auto Detect"
+                    image=one, sampling="Median", **_mode("Auto Detect")
                 ).result
                 print(f"      image {tag} ({second.name if tag == 'b' else baseline.name}) -> {w1}x{h1}")
             batch = torch.cat([img, img_b], dim=0)
             try:
-                grid.execute(image=batch, sampling="Median", grid_mode="Auto Detect")
+                grid.execute(image=batch, sampling="Median", **_mode("Auto Detect"))
             except ValueError as exc:
                 _ok("inconsistent batch raises ValueError", str(exc)[:200])
             except Exception as exc:  # noqa: BLE001
@@ -305,7 +358,7 @@ def section_behaviour(nodes: list, baseline: Path) -> None:
     print("\n  [3d] backend selection")
     for be in ("Auto", "OpenCV"):
         _o, w4, h4, _p4, _d4, _c4 = grid.execute(
-            image=img, sampling="Median", grid_mode="Auto Detect", backend=be
+            image=img, sampling="Median", backend=be, **_mode("Auto Detect")
         ).result
         print(f"      backend={be:<12} -> {w4}x{h4}")
         check(f"backend={be} matches the 125x122 baseline", (w4, h4) == (125, 122), f"got {w4}x{h4}")
@@ -315,19 +368,23 @@ def section_behaviour(nodes: list, baseline: Path) -> None:
     # rather than letting a raw TypeError escape with a foreign traceback.
     lw_raised = None
     try:
-        grid.execute(image=img, sampling="Median", grid_mode="Auto Detect", backend="Lightweight")
+        grid.execute(image=img, sampling="Median", backend="Lightweight", **_mode("Auto Detect"))
     except Exception as exc:  # noqa: BLE001
         lw_raised = exc
-        print(f"      backend=Lightweight Auto Detect raised {type(exc).__name__}")
+        print(f"      backend=Lightweight Auto Detect raised {type(lw_raised).__name__}")
         print("      message : " + str(exc).replace("\n", " ")[:420])
     check("Lightweight auto-detect raises RuntimeError", isinstance(lw_raised, RuntimeError),
           type(lw_raised).__name__ if lw_raised else "no exception")
+    # The pre-flight names the fix rather than letting upstream's bare-None/2-tuple
+    # crash surface, so the message must carry the install hint.
     check("Lightweight error names the upstream no-CV2 bug",
           lw_raised is not None and "estimate_grid_fft" in str(lw_raised))
+    check("Lightweight error carries the OpenCV install hint",
+          lw_raised is not None and "perfect-pixel[opencv]" in str(lw_raised))
 
     _o, w5, h5, _p5, _d5, _c5 = grid.execute(
-        image=img, sampling="Median", grid_mode="By Grid Count", grid_w=125, grid_h=122,
-        backend="Lightweight",
+        image=img, sampling="Median", backend="Lightweight",
+        **_mode("By Grid Count", grid_w=125, grid_h=122),
     ).result
     print(f"      backend=Lightweight By Grid Count(125,122) -> {w5}x{h5}")
     check("Lightweight works when a grid is supplied", (w5, h5) == (125, 122), f"got {w5}x{h5}")
@@ -348,6 +405,233 @@ def section_behaviour(nodes: list, baseline: Path) -> None:
     check("scale=1 is a pass-through",
           (sw1, sh1) == (125, 122) and tuple(scaled1.shape) == tuple(_img.shape),
           f"{sw1}x{sh1}")
+
+
+# --------------------------------------------------------------------------- #
+# 3f. the grid_mode DynamicCombo, and the max_pixel_size port
+# --------------------------------------------------------------------------- #
+def section_grid_schema(nodes: list) -> None:
+    """The mode-aware control's contract, and the schema defaults it depends on."""
+    from pixelpipe.nodes import grid_restore as gr
+
+    print("\n=== 3f. PixelGridRestore schema (the grid_mode DynamicCombo) ===")
+    by_name = {c.__name__: c for c in nodes}
+    schema = by_name["PixelGridRestore"].GET_SCHEMA()
+    ins, _outs = _schema_rows(schema)
+
+    check("grid top-level input ids are exactly the contract",
+          [r["id"] for r in ins] == ["image", "sampling", "grid_mode", "backend",
+                                     "refine_intensity", "fix_square"],
+          str([r["id"] for r in ins]))
+    check("grid top-level input types",
+          [r["type"] for r in ins] == ["IMAGE", "COMBO", "COMFY_DYNAMICCOMBO_V3", "COMBO",
+                                       "FLOAT", "BOOLEAN"],
+          str([r["type"] for r in ins]))
+    check("the old flat grid inputs are gone",
+          not ({"pixel_size", "grid_w", "grid_h", "min_size", "peak_width"}
+               & {r["id"] for r in ins}),
+          str([r["id"] for r in ins]))
+    check("only refine_intensity and fix_square remain advanced",
+          [r["id"] for r in ins if r["advanced"]] == ["refine_intensity", "fix_square"],
+          str([r["id"] for r in ins if r["advanced"]]))
+
+    opts = _dynamic_options(schema)
+    check("there is exactly one DynamicCombo, with the three documented modes",
+          list(opts) == ["grid_mode"]
+          and list(opts["grid_mode"]) == ["Auto Detect", "By Pixel Size", "By Grid Count"],
+          str(list(opts.get("grid_mode", {}))))
+    # DynamicCombo.Input has no `default` kwarg, so a freshly added node shows
+    # whatever the frontend picks; putting the intended default first is the only
+    # lever we have. Pin it, or the node silently opens in a different mode.
+    check("'Auto Detect' is the FIRST option (that is what makes it the default)",
+          next(iter(opts["grid_mode"])) == "Auto Detect")
+
+    auto = {r["id"]: r for r in opts["grid_mode"]["Auto Detect"]}
+    check("Auto Detect carries exactly the parameters detection actually uses",
+          list(auto) == ["min_size", "max_pixel_size", "peak_width"], str(list(auto)))
+    check("max_pixel_size is exposed, defaults to upstream's own ceiling, and has room to rise",
+          (auto["max_pixel_size"]["type"], auto["max_pixel_size"]["default"],
+           auto["max_pixel_size"]["min"], auto["max_pixel_size"]["max"])
+          == ("FLOAT", 20.0, 1.0, 512.0),
+          str(auto["max_pixel_size"]))
+    check("max_pixel_size default equals UPSTREAM_MAX_PIXEL_SIZE "
+          "(the fast path's identity anchor)",
+          auto["max_pixel_size"]["default"] == gr.UPSTREAM_MAX_PIXEL_SIZE,
+          f"{auto['max_pixel_size']['default']} vs {gr.UPSTREAM_MAX_PIXEL_SIZE}")
+    check("By Pixel Size carries only pixel_size",
+          [r["id"] for r in opts["grid_mode"]["By Pixel Size"]] == ["pixel_size"],
+          str([r["id"] for r in opts["grid_mode"]["By Pixel Size"]]))
+    check("By Grid Count carries only grid_w and grid_h",
+          [r["id"] for r in opts["grid_mode"]["By Grid Count"]] == ["grid_w", "grid_h"],
+          str([r["id"] for r in opts["grid_mode"]["By Grid Count"]]))
+
+    check("no nested input is optional, lazy, or advanced",
+          not any(r["optional"] or r["lazy"] or r["advanced"]
+                  for mode in opts["grid_mode"].values() for r in mode),
+          str([(r["id"], r["optional"], r["lazy"], r["advanced"])
+               for mode in opts["grid_mode"].values() for r in mode]))
+
+    # define_schema and the execute-side unpacking read the same constants; if
+    # they drift, a prompt that omits a key silently changes behaviour.
+    defaults = {r["id"]: r["default"] for mode in opts["grid_mode"].values() for r in mode}
+    for name, constant in (("min_size", gr.DEFAULT_MIN_SIZE),
+                           ("max_pixel_size", gr.DEFAULT_MAX_PIXEL_SIZE),
+                           ("peak_width", gr.DEFAULT_PEAK_WIDTH),
+                           ("pixel_size", gr.DEFAULT_PIXEL_SIZE),
+                           ("grid_w", gr.DEFAULT_GRID_W),
+                           ("grid_h", gr.DEFAULT_GRID_H)):
+        check(f"module default {name} matches the schema default",
+              defaults[name] == constant, f"{defaults[name]} vs {constant}")
+
+
+def section_grid_contract(nodes: list) -> None:
+    """Drive ComfyUI's own machinery for the nested-input contract.
+
+    The shape ``execute`` receives from a DynamicCombo is not documented; it was
+    established by reading ``comfy_execution/execution.py`` and confirmed here by
+    calling the two functions that file calls. Asserting against our own
+    ``_mode()`` helper would be circular, so this goes through the real thing.
+    """
+    from comfy_api.latest import _io
+    from pixelpipe.nodes import grid_restore as gr
+
+    print("\n=== 3g. grid_mode runtime contract (via comfy_api internals) ===")
+    by_name = {c.__name__: c for c in nodes}
+    schema = by_name["PixelGridRestore"].GET_SCHEMA()
+    raw = _io.create_input_dict_v1(schema.inputs)
+
+    check("grid_mode serialises as COMFY_DYNAMICCOMBO_V3",
+          raw["required"]["grid_mode"][0] == "COMFY_DYNAMICCOMBO_V3",
+          str(raw["required"]["grid_mode"][0]))
+
+    cases = (
+        ("Auto Detect", {"min_size": 4.0, "max_pixel_size": 20.0, "peak_width": 6}),
+        ("By Pixel Size", {"pixel_size": 16}),
+        ("By Grid Count", {"grid_w": 64, "grid_h": 64}),
+    )
+    all_nested = {"min_size", "max_pixel_size", "peak_width", "pixel_size", "grid_w", "grid_h"}
+    for mode, nested in cases:
+        flat = {"grid_mode": mode, **{f"grid_mode.{k}": v for k, v in nested.items()}}
+        out, _missing, v3 = _io.get_finalized_class_inputs(raw, dict(flat))
+        built = _io.build_nested_inputs(dict(flat), v3)
+        got = built["grid_mode"]
+        prefixed = {k.split(".", 1)[1] for k in out["required"] if k.startswith("grid_mode.")}
+        print(f"      {mode:<15} -> {got}")
+        check(f"{mode}: execute receives the selected key inside the input's own dict",
+              got.get("grid_mode") == mode, str(got))
+        check(f"{mode}: nested values arrive alongside it",
+              {k: v for k, v in got.items() if k != "grid_mode"} == nested, str(got))
+        check(f"{mode}: exactly that mode's parameters become required",
+              prefixed == set(nested), str(sorted(prefixed)))
+        check(f"{mode}: no other mode's parameters leak in",
+              not (all_nested - set(nested)) & prefixed, str(sorted(prefixed)))
+        check(f"{mode}: _unpack_grid_mode round-trips",
+              gr._unpack_grid_mode(got) == (mode, got), str(gr._unpack_grid_mode(got)))
+
+    # Hand-written API prompts: a missing key must not raise, and a bogus mode
+    # must be reported as an unknown mode rather than blowing up on a dict lookup.
+    check("a prompt with no grid_mode at all behaves as Auto Detect",
+          gr._unpack_grid_mode(None)[0] == "Auto Detect", str(gr._unpack_grid_mode(None)))
+    check("a bare (unmatched) mode string is passed through for the caller to reject",
+          gr._unpack_grid_mode("Nonsense")[0] == "Nonsense")
+
+    raised = None
+    try:
+        by_name["PixelGridRestore"].execute(image=None, grid_mode="Nonsense")
+    except ValueError as exc:
+        raised = exc
+    except Exception as exc:  # noqa: BLE001
+        raised = exc
+    check("an unknown grid_mode raises ValueError naming the mode",
+          isinstance(raised, ValueError) and "Nonsense" in str(raised),
+          f"{type(raised).__name__}: {raised}")
+
+    # _pick must not rewrite a legitimate falsy value into the fallback.
+    check("_pick returns a real 0 rather than the fallback", gr._pick({"v": 0}, "v", 99) == 0)
+    check("_pick returns a real False rather than the fallback",
+          gr._pick({"v": False}, "v", True) is False)
+    check("_pick falls back only for a genuinely missing key",
+          gr._pick({}, "v", 99) == 99 and gr._pick({"v": None}, "v", 99) == 99)
+
+
+def section_grid_port(nodes: list, baseline: Path) -> None:
+    """The max_pixel_size port: equivalent at the default, and it fixes the failure."""
+    import numpy as np
+    from pixelpipe.nodes import grid_restore as gr
+
+    print("\n=== 3h. max_pixel_size: port equivalence and the capability it buys ===")
+
+    def synth(cells: int, size: int = 512, seed: int = 0):
+        rng = np.random.default_rng(seed)
+        n = size // cells
+        pal = rng.integers(0, 256, (n * n, 3), dtype=np.uint8)
+        return np.ascontiguousarray(pal.reshape(n, n, 3).repeat(cells, 0).repeat(cells, 1))
+
+    from PIL import Image
+
+    corpus = [("synth 8px cells", synth(8)), ("synth 16px cells", synth(16)),
+              ("synth 24px cells", synth(24)), ("synth 32px cells", synth(32))]
+    if baseline.is_file():
+        with Image.open(baseline) as im:
+            corpus.append(("fox_pixel_00001_", np.array(im.convert("RGB"), dtype=np.uint8)))
+
+    for label, img in corpus:
+        for backend in ("OpenCV", "Lightweight"):
+            module_name = gr._BACKEND_MODULE[backend]
+            module = __import__(module_name, fromlist=["x"])
+            try:
+                upstream = str(module.detect_grid_scale(
+                    img, peak_width=gr.DEFAULT_PEAK_WIDTH,
+                    max_ratio=gr.UPSTREAM_MAX_RATIO, min_size=gr.DEFAULT_MIN_SIZE))
+            except Exception as exc:  # noqa: BLE001 -- the no-CV2 backend's known crash
+                upstream = f"{type(exc).__name__}"
+            port = str(gr._detect_grid_scale_port(
+                module, backend, img, peak_width=gr.DEFAULT_PEAK_WIDTH,
+                min_size=gr.DEFAULT_MIN_SIZE,
+                max_pixel_size=gr.UPSTREAM_MAX_PIXEL_SIZE))
+            raised_ceiling = gr._detect_grid_scale_port(
+                module, backend, img, peak_width=gr.DEFAULT_PEAK_WIDTH,
+                min_size=gr.DEFAULT_MIN_SIZE, max_pixel_size=64.0)
+            print(f"      {label:<17} {backend:<12} upstream={upstream:<12} "
+                  f"port@20={port:<12} port@64={raised_ceiling}")
+            if upstream == f"{type(TypeError()).__name__}":
+                # No valid baseline: upstream crashes where the port recovers.
+                check(f"port is strictly better than upstream on {label} / {backend}",
+                      port != upstream, "port reproduced the crash")
+            else:
+                check(f"port @20.0 == upstream on {label} / {backend}",
+                      port == upstream, f"{port} vs {upstream}")
+
+    # The capability: 32px cells are rejected at the default ceiling and resolved
+    # once it is raised. This is the user's own logged failure, reproduced.
+    from pixelpipe.nodes.grid_restore import UPSTREAM_MAX_PIXEL_SIZE
+    module = __import__(gr._BACKEND_MODULE["OpenCV"], fromlist=["x"])
+    img32 = synth(32)
+    at_default = gr._detect_grid_scale_port(
+        module, "OpenCV", img32, peak_width=gr.DEFAULT_PEAK_WIDTH,
+        min_size=gr.DEFAULT_MIN_SIZE, max_pixel_size=UPSTREAM_MAX_PIXEL_SIZE)
+    at_raised = gr._detect_grid_scale_port(
+        module, "OpenCV", img32, peak_width=gr.DEFAULT_PEAK_WIDTH,
+        min_size=gr.DEFAULT_MIN_SIZE, max_pixel_size=64.0)
+    check("32px cells fail at the default ceiling (the user's logged failure)",
+          at_default == (None, None), str(at_default))
+    check("32px cells resolve to a 16x16 grid once the ceiling is raised",
+          at_raised == (16, 16), str(at_raised))
+
+    # The honest downside, pinned so it cannot be quietly forgotten: raising the
+    # ceiling turns some loud failures into quiet wrong answers.
+    img24 = synth(24)
+    check("24px cells are rejected at the default ceiling",
+          gr._detect_grid_scale_port(
+              module, "OpenCV", img24, peak_width=gr.DEFAULT_PEAK_WIDTH,
+              min_size=gr.DEFAULT_MIN_SIZE, max_pixel_size=UPSTREAM_MAX_PIXEL_SIZE)
+          == (None, None))
+    aliased = gr._detect_grid_scale_port(
+        module, "OpenCV", img24, peak_width=gr.DEFAULT_PEAK_WIDTH,
+        min_size=gr.DEFAULT_MIN_SIZE, max_pixel_size=64.0)
+    check("24px cells become a QUIET WRONG ANSWER (21 cells) when the ceiling is raised "
+          "-- documented, not a bug",
+          aliased == (21, 21), str(aliased))
 
 
 # --------------------------------------------------------------------------- #
@@ -373,6 +657,106 @@ def _schema_rows(schema):
         )
     outs = [(o.display_name, o.io_type) for o in schema.outputs]
     return ins, outs
+
+
+def section_locale(nodes: list) -> None:
+    """The zh translation keys must match what the frontend will actually look up.
+
+    The frontend resolves a slot's text at
+    ``nodeDefs.<node>.inputs.<normalizeI18nKey(slot)>.<name|tooltip>``, and
+    ``normalizeI18nKey`` replaces ``.`` with ``_``. Nested DynamicCombo widgets are
+    named ``"<parent>.<nested>"``, so their lookup key is
+    ``"<parent>_<nested>"`` -- NOT the bare nested id.
+
+    That makes this section load-bearing rather than cosmetic: ``/object_info``
+    does not export nested inputs, so the Vue renderer falls back to an EMPTY
+    string for a nested tooltip it cannot resolve. A stale key set here shows up
+    as blank tooltips in the UI, which is easy to miss and easy to blame on the
+    frontend.
+
+    Asserting the key set is *exact* (not a superset) also keeps dead keys from
+    accumulating after a parameter is moved or removed.
+    """
+    import json
+
+    print("\n=== 4b. zh locale keys vs the schemas ===")
+    path = ROOT / "locales" / "zh" / "nodeDefs.json"
+    if not path.is_file():
+        _fail("zh nodeDefs.json exists", str(path))
+        return
+    with open(path, encoding="utf-8") as fh:
+        defs = json.load(fh)
+    check("locale file has an entry for every registered node",
+          set(defs) == {c.GET_SCHEMA().node_id for c in nodes},
+          f"locale={sorted(defs)} vs nodes={sorted(c.GET_SCHEMA().node_id for c in nodes)}")
+
+    for cls in nodes:
+        schema = cls.GET_SCHEMA()
+        spec = defs.get(schema.node_id)
+        if spec is None:
+            continue
+
+        expected = {i.id for i in schema.inputs}
+        for combo_id, options in _dynamic_options(schema).items():
+            expected.discard(combo_id)
+            expected.add(combo_id)  # the combo itself keeps its own plain key
+            for rows in options.values():
+                for row in rows:
+                    expected.add(f"{combo_id}_{row['id']}")
+        got = set(spec.get("inputs", {}))
+        print(f"  {schema.node_id:<22} inputs: {len(got)} keys")
+        check(f"{schema.node_id}: locale input keys match the schema exactly",
+              got == expected,
+              f"missing={sorted(expected - got)} dead={sorted(got - expected)}")
+        for key, entry in spec.get("inputs", {}).items():
+            check(f"{schema.node_id}.{key}: has a non-empty name and tooltip",
+                  bool(str(entry.get("name", "")).strip())
+                  and bool(str(entry.get("tooltip", "")).strip()),
+                  str(entry)[:120])
+
+        expected_out = {str(n) for n in range(len(schema.outputs))}
+        check(f"{schema.node_id}: locale output keys are 0..{len(schema.outputs) - 1}",
+              set(spec.get("outputs", {})) == expected_out,
+              f"{sorted(spec.get('outputs', {}))} vs {sorted(expected_out)}")
+        check(f"{schema.node_id}: has a non-empty display_name",
+              bool(str(spec.get("display_name", "")).strip()))
+        check(f"{schema.node_id}: has a non-empty description",
+              bool(str(spec.get("description", "")).strip()))
+
+
+def _dynamic_options(schema) -> "dict[str, list[dict]]":
+    """``{option_key: [nested rows]}`` for every DynamicCombo input in ``schema``.
+
+    ``_schema_rows()`` only walks top-level inputs, and a DynamicCombo serialises
+    as a single row, so without this the nested parameters are invisible to both
+    the printed report and the assertions.
+    """
+    from comfy_api.latest import io
+
+    out: dict[str, list[dict]] = {}
+    for i in schema.inputs:
+        if not isinstance(i, io.DynamicCombo.Input):
+            continue
+        opts = {}
+        for option in i.options:
+            rows = []
+            for nested in option.inputs:
+                d = nested.as_dict()
+                rows.append(
+                    {
+                        "id": nested.id,
+                        "type": nested.io_type,
+                        "default": d.get("default"),
+                        "min": d.get("min"),
+                        "max": d.get("max"),
+                        "optional": bool(d.get("optional")),
+                        "lazy": bool(d.get("lazy")),
+                        "advanced": bool(d.get("advanced")),
+                    }
+                )
+            opts[option.key] = rows
+        out[i.id] = opts
+    return out
 
 
 def section_palette_schema(nodes: list) -> None:
@@ -421,50 +805,60 @@ def section_palette_schema(nodes: list) -> None:
     check("nothing on Extract is optional or lazy",
           not any(r["optional"] or r["lazy"] for r in ins))
 
-    quantize = by_name["PixelPaletteQuantize"].GET_SCHEMA()
-    qins, qouts = _schema_rows(quantize)
-    print(f"\n  --- {quantize.node_id} ---")
-    for row in qins:
+    apply_node = by_name["PixelPaletteApply"].GET_SCHEMA()
+    ains, aouts = _schema_rows(apply_node)
+    print(f"\n  --- {apply_node.node_id} ---")
+    for row in ains:
         flags = [f for f in ("optional", "lazy") if row[f]]
         print(f"      in  {row['id']:<16} {row['type']:<7} default={row['default']!r} "
               f"min={row['min']} max={row['max']} options={row['options']} {flags}")
-    for name, io_type in qouts:
+    for name, io_type in aouts:
         print(f"      out {name:<16} {io_type}")
-    check("Quantize input ids are exactly the contract",
-          [r["id"] for r in qins] == ["image", "method", "colors", "tile_size", "space",
-                                     "dither", "accent_protect", "palette"],
-          str([r["id"] for r in qins]))
-    check("Quantize input types",
-          [r["type"] for r in qins] == ["IMAGE", "COMBO", "INT", "INT", "COMBO", "COMBO",
-                                        "BOOLEAN", "STRING"],
-          str([r["type"] for r in qins]))
-    check("Quantize defaults: method=Per-Tile, colors=128, tile_size=16, space=Lab, "
-          "dither=None, accent_protect=True",
-          (qins[1]["default"], qins[2]["default"], qins[3]["default"], qins[4]["default"],
-           qins[5]["default"], qins[6]["default"])
-          == ("Per-Tile k-means", 128, 16, "Lab", "None", True),
-          str([qins[i]["default"] for i in (1, 2, 3, 4, 5, 6)]))
-    check("Quantize method options include Fixed Palette (nearest)",
-          qins[1]["options"] == ["Per-Tile k-means", "Global k-means (Lab)", "Median Cut",
-                                 "Max Coverage", "Octree", "Fixed Palette (nearest)"],
-          str(qins[1]["options"]))
-    check("Quantize dither options",
-          qins[5]["options"] == ["None", "Bayer 2x2", "Bayer 4x4", "Bayer 8x8", "Floyd-Steinberg"],
-          str(qins[5]["options"]))
-    check("Quantize outputs are (image IMAGE, applied_palette STRING, colors_used INT)",
-          qouts == [("image", "IMAGE"), ("applied_palette", "STRING"), ("colors_used", "INT")],
-          str(qouts))
 
-    palette_in = qins[7]
-    check("palette input is optional", palette_in["optional"] is True,
+    # The whole point of the rewrite: a node that only applies a palette has no
+    # derive parameters left to go silently inert.
+    check("Apply input ids are exactly the contract",
+          [r["id"] for r in ains] == ["image", "palette", "space", "dither"],
+          str([r["id"] for r in ains]))
+    check("Apply input types",
+          [r["type"] for r in ains] == ["IMAGE", "STRING", "COMBO", "COMBO"],
+          str([r["type"] for r in ains]))
+    check("Apply has no derive-path inputs left",
+          not ({"method", "colors", "tile_size", "accent_protect"}
+               & {r["id"] for r in ains}),
+          str([r["id"] for r in ains]))
+    check("Apply defaults: palette='', space=Lab, dither=None",
+          (ains[1]["default"], ains[2]["default"], ains[3]["default"]) == ("", "Lab", "None"),
+          str([ains[i]["default"] for i in (1, 2, 3)]))
+    check("Apply dither options",
+          ains[3]["options"] == ["None", "Bayer 2x2", "Bayer 4x4", "Bayer 8x8", "Floyd-Steinberg"],
+          str(ains[3]["options"]))
+    check("Apply outputs are (image IMAGE, applied_palette STRING, colors_used INT)",
+          aouts == [("image", "IMAGE"), ("applied_palette", "STRING"), ("colors_used", "INT")],
+          str(aouts))
+
+    palette_in = ains[1]
+    check("palette is required, not optional", palette_in["optional"] is False,
           f"optional={palette_in['optional']}")
-    check("palette input is lazy", palette_in["lazy"] is True, f"lazy={palette_in['lazy']}")
-    check("palette input is a STRING carrying a text default",
+    check("palette is NOT lazy (the pruning it existed for is gone)",
+          palette_in["lazy"] is False, f"lazy={palette_in['lazy']}")
+    check("palette is a STRING carrying a text default",
           palette_in["type"] == "STRING" and palette_in["default"] == "",
           f"{palette_in['type']} default={palette_in['default']!r}")
-    check("palette is the only optional/lazy input on Quantize",
-          [r["id"] for r in qins if r["optional"] or r["lazy"]] == ["palette"],
-          str([r["id"] for r in qins if r["optional"] or r["lazy"]]))
+    check("nothing on Apply is optional or lazy",
+          not any(r["optional"] or r["lazy"] for r in ains),
+          str([r["id"] for r in ains if r["optional"] or r["lazy"]]))
+    # hasattr() is useless here: io.ComfyNode defines check_lazy_status on the
+    # base class, so it is always present. What matters is that Apply does not
+    # OVERRIDE it -- an override is the only thing that could re-introduce lazy
+    # re-queueing.
+    check("Apply does not override check_lazy_status",
+          "check_lazy_status" not in vars(by_name["PixelPaletteApply"]),
+          str([k for k in vars(by_name["PixelPaletteApply"]) if "lazy" in k]))
+    check("the old PixelPaletteQuantize node class is gone",
+          "PixelPaletteQuantize" not in by_name, str(sorted(by_name)))
+    check("the old PixelPaletteQuantize node_id is gone",
+          all(c.GET_SCHEMA().node_id != "PixelPaletteQuantize" for c in nodes))
 
 
 # --------------------------------------------------------------------------- #
@@ -497,7 +891,7 @@ def section_palette_behaviour(nodes: list, out_dir: Path) -> None:
     import torch
 
     from pixelpipe.nodes import _palette_utils as pu
-    from pixelpipe.nodes.palette import PixelPaletteExtract, PixelPaletteQuantize
+    from pixelpipe.nodes.palette import PixelPaletteApply, PixelPaletteExtract
 
     by_name = {c.__name__: c for c in nodes}
 
@@ -562,7 +956,7 @@ def section_palette_behaviour(nodes: list, out_dir: Path) -> None:
           garbage is not None and "not-a-colour" in str(garbage))
 
     print("\n=== 6. cross-image consistency (A's palette onto B) ===")
-    out_b, applied_b, used_b = PixelPaletteQuantize.execute(
+    out_b, applied_b, used_b = PixelPaletteApply.execute(
         image=b_img, palette=hex_a, space="Lab", dither="None"
     ).result
     b_rgb = _to_u8(out_b)[0]
@@ -591,32 +985,42 @@ def section_palette_behaviour(nodes: list, out_dir: Path) -> None:
           f"{len(b_set & pal_set)} shared with A, {len(b_set - pal_set)} unique to B")
     _save_rgb(out_dir / "pixel_verify_B_swatch.png", _to_u8(swatch_b)[0])
 
-    print("\n=== 7. every method runs ===")
-    quant_results = {}
-    for method in pu.QUANTIZE_METHODS:
-        args = dict(image=a_img, method=method, colors=32, tile_size=16, space="Lab")
-        if method == pu.FIXED_PALETTE:
-            # Designed to raise without a palette -- see the check right below.
-            args["palette"] = hex_a
-        try:
-            _o, _ap, used = PixelPaletteQuantize.execute(**args).result
-        except Exception as exc:  # noqa: BLE001
-            check(f"Quantize method {method!r} runs", False, f"{type(exc).__name__}: {exc}")
-            continue
-        quant_results[method] = used
-        print(f"  [quantize] {method:<26} colors_used={used}")
-        check(f"Quantize method {method!r} runs", True, f"colors_used={used}")
-        check(f"Quantize method {method!r} stays within colors=32", used <= 32,
-              f"got {used}")
+    print("\n=== 7. Apply: a wired palette and a pasted one ===")
+    # Both palette sources now go through one code path -- there is no derive
+    # path left for them to disagree with.
+    out_w, applied_w, used_w = PixelPaletteApply.execute(
+        image=a_img, palette=hex_a, space="Lab", dither="None"
+    ).result
+    w_set = set(_pack(_to_u8(out_w)[0]).tolist())
+    print(f"  [apply] wired from Extract    colors_used={used_w} of {len(pal_set)} palette entries")
+    check("Apply accepts a palette wired from Extract", used_w > 0, f"used={used_w}")
+    check("Apply output is a subset of the supplied palette", w_set <= pal_set,
+          f"{len(w_set - pal_set)} outside")
+
+    pasted = "#405060,#102030"
+    out_p, applied_p, used_p = PixelPaletteApply.execute(
+        image=a_img, palette=pasted, space="Lab", dither="None"
+    ).result
+    print(f"  [apply] pasted HEX            colors_used={used_p} applied={applied_p!r}")
+    check("Apply accepts a pasted HEX palette", used_p > 0, f"used={used_p}")
+    check("pasted palette: output uses only those two colours",
+          set(_pack(_to_u8(out_p)[0]).tolist()) <= {0x405060, 0x102030},
+          str(sorted(set(_pack(_to_u8(out_p)[0]).tolist()))))
+    # Verbatim means order is preserved, not re-sorted by luminance: #405060 is
+    # lighter than #102030, so a luminance sort would swap them.
+    check("applied_palette is the supplied palette verbatim (order preserved, not re-sorted)",
+          applied_p == "#405060\n#102030", repr(applied_p))
 
     raised = None
     try:
-        PixelPaletteQuantize.execute(image=a_img, method=pu.FIXED_PALETTE, colors=32)
+        PixelPaletteApply.execute(image=a_img, palette="   \n  ", space="Lab", dither="None")
     except ValueError as exc:
         raised = exc
-    check("Fixed Palette without a palette raises ValueError naming the input",
+    check("an empty palette raises ValueError naming the input",
           raised is not None and "palette" in str(raised),
           type(raised).__name__ if raised else "no exception")
+    check("the empty-palette error says this node does not derive one",
+          raised is not None and "derive" in str(raised), str(raised)[:160])
 
     # Both accent_protect modes are pinned, because the default changed the
     # answer: accents are paid for out of the colour budget, so switching
@@ -646,19 +1050,18 @@ def section_palette_behaviour(nodes: list, out_dir: Path) -> None:
         if row[1] is not None:
             check(f"Extract method {method!r} with accent_protect=True stays within 8..32",
                   8 <= row[1] <= 32, f"got {row[1]}")
-    check("Extract does not offer Fixed Palette (it cannot extract one)",
-          pu.FIXED_PALETTE not in pu.EXTRACT_METHODS)
+    check("the method list has no 'apply a palette' entry left",
+          not hasattr(pu, "FIXED_PALETTE") and not hasattr(pu, "QUANTIZE_METHODS"),
+          "FIXED_PALETTE / QUANTIZE_METHODS are dead and must be gone")
 
     print("\n=== 8. dithering ===")
-    # Every dither variant is compared against the palette the *quantizer* used
-    # (accent_protect is on there by default, so it is not the same 32 colours as
-    # the extractor's), which is the only meaningful reference.
+    # Every dither variant is measured against the palette that was actually
+    # supplied -- which is now the only kind of palette there is.
     variants_out = {}
     dither_pal = None
     for mode in ("None", "Bayer 2x2", "Bayer 4x4", "Bayer 8x8", "Floyd-Steinberg"):
-        out, applied, used = PixelPaletteQuantize.execute(
-            image=a_img, method="Per-Tile k-means", colors=32, tile_size=16, space="Lab",
-            dither=mode,
+        out, applied, used = PixelPaletteApply.execute(
+            image=a_img, palette=hex_a, space="Lab", dither=mode,
         ).result
         rgb = _to_u8(out)[0]
         variants_out[mode] = rgb
@@ -742,8 +1145,8 @@ def section_palette_behaviour(nodes: list, out_dir: Path) -> None:
         ),
     )
 
-    print("\n=== 9. lazy pruning (the real graph pruner) ===")
-    _section_lazy(by_name=by_name, hex_a=hex_a)
+    print("\n=== 9. graph dependency (the real graph planner) ===")
+    _section_graph(by_name=by_name, hex_a=hex_a)
 
     print("\n=== 10. determinism ===")
     hex_a2, _sw2, count_a2 = PixelPaletteExtract.execute(
@@ -753,18 +1156,16 @@ def section_palette_behaviour(nodes: list, out_dir: Path) -> None:
           "differs" if hex_a != hex_a2 else "")
     check("Extract: identical count on a second run", count_a == count_a2)
 
-    q1, ap1, u1 = PixelPaletteQuantize.execute(
-        image=a_img, method="Per-Tile k-means", colors=32, tile_size=16, space="Lab",
-        dither="Bayer 4x4",
+    q1, ap1, u1 = PixelPaletteApply.execute(
+        image=a_img, palette=hex_a, space="Lab", dither="Bayer 4x4",
     ).result
-    q2, ap2, u2 = PixelPaletteQuantize.execute(
-        image=a_img, method="Per-Tile k-means", colors=32, tile_size=16, space="Lab",
-        dither="Bayer 4x4",
+    q2, ap2, u2 = PixelPaletteApply.execute(
+        image=a_img, palette=hex_a, space="Lab", dither="Bayer 4x4",
     ).result
-    check("Quantize: applied_palette is byte-identical on a second run", ap1 == ap2)
-    check("Quantize: output tensor is byte-identical on a second run",
+    check("Apply: applied_palette is byte-identical on a second run", ap1 == ap2)
+    check("Apply: output tensor is byte-identical on a second run",
           bool(torch.equal(q1, q2)), f"max|d| = {float((q1 - q2).abs().max())}")
-    check("Quantize: colors_used is identical on a second run", u1 == u2)
+    check("Apply: colors_used is identical on a second run", u1 == u2)
     check("k-means seed is a hard-coded constant",
           pu.KMEANS_SEED == 0x5EED_1234, hex(pu.KMEANS_SEED))
 
@@ -781,9 +1182,16 @@ def section_palette_behaviour(nodes: list, out_dir: Path) -> None:
 
     print("\n  batch behaviour (one shared palette for both frames)")
     batch = torch.cat([a_img, b_img[:, :976, :1000, :]], dim=0)
-    _bo, bap, bused = PixelPaletteQuantize.execute(
-        image=batch, method="Per-Tile k-means", colors=32, tile_size=16, space="Lab"
+    # Extract pools a batch into ONE palette (that is what keeps a sprite set
+    # consistent), and Apply then holds every frame of the batch inside it.
+    bhex_batch, _bsw, bcount = PixelPaletteExtract.execute(
+        image=batch, colors=32, method="Per-Tile k-means", space="Lab", sort="Luminance",
     ).result
+    _bo, bap, bused = PixelPaletteApply.execute(
+        image=batch, palette=bhex_batch, space="Lab", dither="None"
+    ).result
+    check("Apply echoes a batch palette back verbatim", bap == bhex_batch,
+          "differs" if bap != bhex_batch else "")
     bset = set(_pack(_to_u8(_bo)).tolist())
     print(f"  batch of {tuple(batch.shape)} -> {bused} colours, shared palette "
           f"{len(pu.parse_palette_hex(bap))} entries")
@@ -792,23 +1200,249 @@ def section_palette_behaviour(nodes: list, out_dir: Path) -> None:
           f"{len(bset - set(_pack(pu.parse_palette_hex(bap)).tolist()))} outside")
 
 
-def _section_lazy(by_name: dict, hex_a: str) -> None:
+def section_apply_validation(nodes: list) -> None:
+    """Drive ``execution.validate_inputs`` -- the exact path a user's Run hits.
+
+    This is the highest-fidelity guard in the file. The bug it exists for was
+    invisible to every isolated unit check: calling ``validate_inputs(palette=...)``
+    by hand passes a real string, but the framework passes ``None`` for any
+    *linked* input because validation runs before execution. Only driving the
+    real function reproduces that, so only this test could have caught it.
+
+    It also pins the error COUNT. execution.py appends the validator's returned
+    string once per entry of ``input_filtered``, and ``input_filtered`` is
+    derived from the validator's parameter names -- so a ``**kwargs`` validator
+    reports the same message against every socket on the node.
+    """
+    import asyncio
+
+    import execution
+    import nodes as comfy_nodes
+
+    print("\n=== 9b. Apply validation through the real framework ===")
+    for cls in nodes:
+        comfy_nodes.NODE_CLASS_MAPPINGS.setdefault(cls.GET_SCHEMA().node_id, cls)
+
+    def prompt(palette_input):
+        return {
+            "9": {"class_type": "LoadImage", "inputs": {"image": "fox_pixel_00001_.png"}},
+            "3": {"class_type": "PixelGridRestore",
+                  "inputs": {"image": ["9", 0], "sampling": "Majority Cluster",
+                             "grid_mode": {"grid_mode": "Auto Detect"},
+                             "backend": "Auto", "refine_intensity": 0.25,
+                             "fix_square": True}},
+            "1": {"class_type": "PixelPaletteExtract",
+                  "inputs": {"image": ["3", 0], "colors": 32,
+                             "method": "Per-Tile k-means", "space": "Lab",
+                             "sort": "Luminance", "accent_protect": True, "tile_size": 16}},
+            "2": {"class_type": "PixelPaletteApply",
+                  "inputs": {"image": ["3", 0], "palette": palette_input,
+                             "space": "Lab", "dither": "None"}},
+        }
+
+    async def validate(palette_input):
+        validated: dict = {}
+        await execution.validate_inputs("selftest", prompt(palette_input), "2", validated)
+        ok, reasons, _ = validated.get("2", (None, None, None))
+        return ok, (reasons or [])
+
+    cases = (
+        ("wired from Extract", ["1", 0], True),
+        ("typed as a HEX constant", "#102030\n#405060", True),
+        ("left empty", "", False),
+    )
+    for label, value, expect_valid in cases:
+        ok, reasons = asyncio.run(validate(value))
+        print(f"      {label:<24} valid={ok}  errors={len(reasons)}")
+        check(f"Apply validates correctly when the palette is {label}",
+              bool(ok) is expect_valid, f"valid={ok}, errors={[r.get('details') for r in reasons]}")
+        if not expect_valid:
+            # One error, named after the socket that is wrong -- not one per input.
+            check("an empty palette produces exactly ONE error",
+                  len(reasons) == 1, f"got {len(reasons)}: {[r.get('details') for r in reasons]}")
+            check("that error is attributed to the palette input",
+                  reasons and reasons[0].get("extra_info", {}).get("input_name") == "palette",
+                  str([r.get("extra_info") for r in reasons]))
+
+
+def section_video_schema(nodes: list) -> None:
+    """The video node's contract, and the constraints that keep the pack loading."""
+    from pixelpipe.nodes import grid_restore as gr
+    from pixelpipe.nodes import video_grid_restore as vg
+
+    print("\n=== 12. PixelVideoGridRestore schema ===")
+    by_name = {c.__name__: c for c in nodes}
+    schema = by_name["PixelVideoGridRestore"].GET_SCHEMA()
+    ins, outs = _schema_rows(schema)
+
+    check("video top-level input ids are exactly the contract",
+          [r["id"] for r in ins] == ["video", "sampling", "grid_mode", "temporal_window",
+                                     "backend", "chunk_frames", "fallback_pixel_size"],
+          str([r["id"] for r in ins]))
+    check("video input types",
+          [r["type"] for r in ins] == ["VIDEO", "COMBO", "COMFY_DYNAMICCOMBO_V3", "INT",
+                                       "COMBO", "INT", "INT"],
+          str([r["type"] for r in ins]))
+    check("only chunk_frames / fallback_pixel_size are advanced",
+          [r["id"] for r in ins if r["advanced"]]
+          == ["chunk_frames", "fallback_pixel_size"],
+          str([r["id"] for r in ins if r["advanced"]]))
+    check("temporal_window defaults to 0 (off) and can be turned off",
+          (ins[3]["default"], ins[3]["min"], ins[3]["max"]) == (0, 0, 8),
+          str((ins[3]["default"], ins[3]["min"], ins[3]["max"])))
+    check("chunk_frames defaults to 12 and 0 means unchunked",
+          (ins[5]["default"], ins[5]["min"]) == (12, 0),
+          str((ins[5]["default"], ins[5]["min"])))
+    check("video output list is exactly the 9 documented outputs",
+          outs == [("video", "VIDEO"), ("images", "IMAGE"), ("audio", "AUDIO"),
+                   ("fps", "FLOAT"), ("grid_w", "INT"), ("grid_h", "INT"),
+                   ("pixel_size", "FLOAT"), ("detected", "BOOLEAN"),
+                   ("confidence", "FLOAT")],
+          str(outs))
+
+    opts = _dynamic_options(schema)
+    check("the video node's only DynamicCombo is grid_mode, with the three modes",
+          list(opts) == ["grid_mode"]
+          and list(opts["grid_mode"]) == ["Auto Detect", "By Pixel Size", "By Grid Count"],
+          str(list(opts.get("grid_mode", {}))))
+    # No `default` kwarg exists on DynamicCombo.Input, so option order IS the
+    # default. Pin it or the node silently opens in a different mode.
+    check("'Auto Detect' is FIRST on the video node too (that is the default lever)",
+          next(iter(opts["grid_mode"])) == "Auto Detect")
+    auto = {r["id"] for r in opts["grid_mode"]["Auto Detect"]}
+    check("Auto Detect carries sample_stride plus the three detector parameters",
+          auto == {"sample_stride", "min_size", "max_pixel_size", "peak_width"}, str(auto))
+    check("no nested video input is optional, lazy or advanced",
+          not any(r["optional"] or r["lazy"] or r["advanced"]
+                  for mode in opts["grid_mode"].values() for r in mode),
+          str([(r["id"], r["optional"], r["lazy"], r["advanced"])
+               for mode in opts["grid_mode"].values() for r in mode]))
+
+    defaults = {r["id"]: r["default"] for mode in opts["grid_mode"].values() for r in mode}
+    for name, constant in (("min_size", gr.DEFAULT_MIN_SIZE),
+                           ("max_pixel_size", gr.DEFAULT_MAX_PIXEL_SIZE),
+                           ("peak_width", gr.DEFAULT_PEAK_WIDTH),
+                           ("pixel_size", gr.DEFAULT_PIXEL_SIZE),
+                           ("grid_w", gr.DEFAULT_GRID_W),
+                           ("grid_h", gr.DEFAULT_GRID_H),
+                           ("sample_stride", vg.DEFAULT_SAMPLE_STRIDE)):
+        check(f"video nested default {name} matches its module constant",
+              defaults[name] == constant, f"{defaults[name]} vs {constant}")
+
+    # The two nodes must agree on these, or the same value means different things
+    # depending on which node you are looking at.
+    check("video sampling is independent; existing backend and grid choices stay compatible",
+          set(gr.SAMPLING_OPTIONS).issubset(vg.SAMPLING_OPTIONS)
+          and vg.SAMPLING_OPTIONS[0] == "Robust Cell"
+          and vg.BACKEND_OPTIONS is gr.BACKEND_OPTIONS
+          and vg.GRID_MODE_OPTIONS is gr.GRID_MODE_OPTIONS)
+    from pixelpipe.nodes import _palette_utils as pu
+    check("SAMPLE_SEED matches the palette nodes' KMEANS_SEED (one fixed seed in the pack)",
+          gr.SAMPLE_SEED == pu.KMEANS_SEED, f"{hex(gr.SAMPLE_SEED)} vs {hex(pu.KMEANS_SEED)}")
+
+
+def section_video_contract(nodes: list) -> None:
+    """Drive the video node's DynamicCombo through comfy_api's own machinery."""
+    from comfy_api.latest import _io
+    from pixelpipe.nodes import video_grid_restore as vg
+
+    print("\n=== 13. PixelVideoGridRestore runtime contract ===")
+    by_name = {c.__name__: c for c in nodes}
+    schema = by_name["PixelVideoGridRestore"].GET_SCHEMA()
+    raw = _io.create_input_dict_v1(schema.inputs)
+
+    check("grid_mode serialises as COMFY_DYNAMICCOMBO_V3 on the video node",
+          raw["required"]["grid_mode"][0] == "COMFY_DYNAMICCOMBO_V3",
+          str(raw["required"]["grid_mode"][0]))
+
+    cases = (
+        ("Auto Detect", {"sample_stride": 8, "min_size": 4.0, "max_pixel_size": 20.0,
+                         "peak_width": 6}),
+        ("By Pixel Size", {"pixel_size": 16}),
+        ("By Grid Count", {"grid_w": 64, "grid_h": 64}),
+    )
+    every = {"sample_stride", "min_size", "max_pixel_size", "peak_width", "pixel_size",
+             "grid_w", "grid_h"}
+    for mode, nested in cases:
+        flat = {"grid_mode": mode, **{f"grid_mode.{k}": v for k, v in nested.items()}}
+        out, _missing, v3 = _io.get_finalized_class_inputs(raw, dict(flat))
+        built = _io.build_nested_inputs(dict(flat), v3)["grid_mode"]
+        prefixed = {k.split(".", 1)[1] for k in out["required"] if k.startswith("grid_mode.")}
+        print(f"      {mode:<15} -> {built}")
+        check(f"video {mode}: the selected key rides inside the input's own dict",
+              built.get("grid_mode") == mode, str(built))
+        check(f"video {mode}: exactly that mode's parameters become required",
+              prefixed == set(nested), str(sorted(prefixed)))
+        check(f"video {mode}: no other mode's parameters leak in",
+              not (every - set(nested)) & prefixed, str(sorted(prefixed)))
+        check(f"video {mode}: _unpack_grid_mode round-trips",
+              vg._unpack_grid_mode(built)[0] == mode)
+
+    check("a video prompt with no grid_mode at all behaves as Auto Detect",
+          vg._unpack_grid_mode(None)[0] == "Auto Detect")
+
+
+def section_video_behaviour(nodes: list) -> None:
+    """Run the video v2 regressions against real ComfyUI components."""
+    import unittest
+    suite = unittest.defaultTestLoader.discover(str(ROOT / "tests"), pattern="test_video_pipeline.py")
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    check("video v2 motion, alpha, timing and sampling regressions", result.wasSuccessful(),
+          f"{result.testsRun} tests, {len(result.failures)} failures, {len(result.errors)} errors")
+
+
+def execution_get_input_data_probe(node_cls) -> "list[tuple[str, object]]":
+    """What ``validate_inputs`` sees for a wired vs a typed palette.
+
+    Drives ``execution.get_input_data`` for real rather than hand-writing the
+    expected value: the ``None`` this exposes is the entire reason a wired
+    palette used to fail validation, and it is not documented anywhere obvious.
+    Called without an ``execution_list``, exactly as ``execution.validate_inputs``
+    calls it, so every linked input is marked missing.
+    """
+    import execution
+
+    cases = (
+        ("wired (link)", {"image": ["1", 0], "palette": ["2", 0],
+                          "space": "Lab", "dither": "None"}),
+        ("typed as a constant", {"image": ["1", 0], "palette": "#102030\n#405060",
+                                 "space": "Lab", "dither": "None"}),
+        ("empty constant", {"image": ["1", 0], "palette": "",
+                            "space": "Lab", "dither": "None"}),
+    )
+    out = []
+    for label, inputs in cases:
+        data, _missing, _v3 = execution.get_input_data(inputs, node_cls, "3")
+        # get_input_data wraps constants in a 1-element list; execution's
+        # get_slice() unwraps it before calling the validator, so unwrap here too.
+        seen = data.get("palette")
+        if isinstance(seen, (list, tuple)):
+            seen = seen[0]
+        out.append((label, seen))
+    return out
+
+
+def _section_graph(by_name: dict, hex_a: str) -> None:
     """Drive the real ``TopologicalSort`` -- no ComfyUI server required.
 
-    ``comfy_execution/graph.py:169-172`` skips the upstream node of a *lazy*
-    input when it builds the initial execution block. That block *is* the
-    execution plan, so if ``PixelPaletteExtract`` is absent from it, it is
-    provably not executed -- which is a stronger statement than watching a
-    counter stay at zero.
+    This section used to prove that the ``lazy`` palette input pruned the
+    ``PixelPaletteExtract`` subtree out of the execution graph. That input is now
+    an ordinary required one, so the property to prove is the mirror image: the
+    palette is a *hard* dependency, and Extract is in the execution block from
+    the start rather than being promoted into it by ``check_lazy_status`` on a
+    second pass.
+
+    Worth keeping rather than deleting, because "the node I wired always runs" is
+    the thing a future lazy refactor would silently take away again.
     """
     import comfy_execution.graph as graph_mod
     import nodes as comfy_nodes
 
-    quantize = by_name["PixelPaletteQuantize"]
+    apply_node = by_name["PixelPaletteApply"]
     extract = by_name["PixelPaletteExtract"]
 
     # The pruner looks node types up in the global registry.
-    for cls in (by_name["PixelGridRestore"], extract, quantize, by_name["PixelExportScale"]):
+    for cls in (by_name["PixelGridRestore"], extract, apply_node, by_name["PixelExportScale"]):
         comfy_nodes.NODE_CLASS_MAPPINGS.setdefault(cls.GET_SCHEMA().node_id, cls)
 
     def build(palette_value):
@@ -819,7 +1453,8 @@ def _section_lazy(by_name: dict, hex_a: str) -> None:
                 # registered. Node 1 is the root of the graph here.
                 "class_type": "PixelGridRestore",
                 "inputs": {"image": None, "sampling": "Median",
-                           "grid_mode": "By Grid Count", "grid_w": 125, "grid_h": 122},
+                           "grid_mode": {"grid_mode": "By Grid Count",
+                                         "grid_w": 125, "grid_h": 122}},
             },
             "2": {
                 "class_type": "PixelPaletteExtract",
@@ -827,10 +1462,9 @@ def _section_lazy(by_name: dict, hex_a: str) -> None:
                            "space": "Lab", "sort": "Luminance"},
             },
             "3": {
-                "class_type": "PixelPaletteQuantize",
-                "inputs": {"image": ["1", 0], "method": "Per-Tile k-means", "colors": 32,
-                           "tile_size": 16, "space": "Lab", "dither": "None",
-                           "accent_protect": True, "palette": palette_value},
+                "class_type": "PixelPaletteApply",
+                "inputs": {"image": ["1", 0], "space": "Lab", "dither": "None",
+                           "palette": palette_value},
             },
             "4": {
                 "class_type": "PixelExportScale",
@@ -843,58 +1477,66 @@ def _section_lazy(by_name: dict, hex_a: str) -> None:
         topo.add_node("4")
         return topo
 
-    unwired = plan("")  # untouched widget -> a constant, not a link
     wired = plan(["2", 0])  # real link to the extract node
-
-    print(f"  initial block, palette unwired : {sorted(unwired.pendingNodes)}")
     print(f"  initial block, palette wired   : {sorted(wired.pendingNodes)}")
-    check("a lazy link is held out of the initial block whether or not it is wired",
-          sorted(unwired.pendingNodes) == ["1", "3", "4"]
-          and sorted(wired.pendingNodes) == ["1", "3", "4"],
-          f"{sorted(unwired.pendingNodes)} / {sorted(wired.pendingNodes)}")
-    check("palette unwired: PixelPaletteExtract (node 2) never enters the graph",
-          "2" not in unwired.pendingNodes, f"block = {sorted(unwired.pendingNodes)}")
+    check("a wired palette pulls PixelPaletteExtract into the INITIAL block",
+          sorted(wired.pendingNodes) == ["1", "2", "3", "4"],
+          f"block = {sorted(wired.pendingNodes)} -- no second pass should be needed")
 
-    # Stage two: this is exactly what execution.py does when check_lazy_status
-    # answers ["palette"] on the re-queue (execution.py:517-520).
-    wired.make_input_strong_link("3", "palette")
-    print(f"  after check_lazy_status asks for 'palette' : {sorted(wired.pendingNodes)}")
-    check("palette wired: the request promotes it to a strong link and pulls node 2 in",
-          "2" in wired.pendingNodes, f"block = {sorted(wired.pendingNodes)}")
+    # A pasted palette needs no upstream at all, so Extract stays out -- but for
+    # the ordinary reason (nothing links to it), not because a lazy input pruned it.
+    pasted = plan("#102030\n#405060")
+    print(f"  initial block, palette pasted  : {sorted(pasted.pendingNodes)}")
+    check("a pasted palette needs no upstream node",
+          "2" not in pasted.pendingNodes, f"block = {sorted(pasted.pendingNodes)}")
+    check("a pasted palette still schedules Apply itself",
+          "3" in pasted.pendingNodes, f"block = {sorted(pasted.pendingNodes)}")
 
-    # And the framework refuses the mirror-image mistake: asking for an unwired
-    # widget raises, because a constant cannot be promoted to a link. This is the
-    # reason check_lazy_status must test for None and not for falsiness.
-    refused = None
-    try:
-        unwired.make_input_strong_link("3", "palette")
-    except Exception as exc:  # noqa: BLE001 -- raising is the assertion
-        refused = exc
-    print(f"  requesting the unwired widget directly      : "
-          f"{type(refused).__name__ if refused else 'NO ERROR'}: {refused}")
-    check("requesting an unwired palette is refused by the framework (it is a constant)",
-          refused is not None and "constant" in str(refused),
-          str(refused) if refused else "no exception")
+    # validate_inputs is now the only thing standing between a prompt and an
+    # empty palette, since there is no lazy re-queue to catch it later.
+    #
+    # REGRESSION, and the reason this block is shaped the way it is: validation
+    # runs BEFORE any node executes, and execution.get_input_data() marks every
+    # *linked* input missing when it is called without an execution_list -- which
+    # is precisely how the validation phase calls it. So a wired palette arrives
+    # at validate_inputs as None. Treating None as "empty" makes a wired palette
+    # impossible to validate, i.e. it bricks the node for the only wiring the
+    # pack is designed around. None must mean "not known yet; execute() decides".
+    import inspect
 
-    # The check_lazy_status contract that makes the above work.
-    check("check_lazy_status asks for palette only when it is wired-but-unevaluated",
-          quantize.check_lazy_status(palette=None) == ["palette"],
-          str(quantize.check_lazy_status(palette=None)))
-    check("check_lazy_status is silent when palette is unconnected (MISSING)",
-          quantize.check_lazy_status() == [],
-          str(quantize.check_lazy_status()))
-    check("check_lazy_status is silent when the caller omitted the key entirely",
-          quantize.check_lazy_status(image=None, method="Per-Tile k-means") == [])
-    check("check_lazy_status is silent for an untouched empty widget",
-          quantize.check_lazy_status(palette="") == [])
-    check("check_lazy_status is silent once a palette value arrived",
-          quantize.check_lazy_status(palette=hex_a) == [])
-    check("validate_inputs runs before check_lazy_status and tolerates palette=None",
-          quantize.validate_inputs(palette=None, method="Per-Tile k-means", colors=32) is True)
-    check("validate_inputs rejects an out-of-range colors",
-          isinstance(quantize.validate_inputs(colors=999), str))
-    check("validate_inputs rejects an unknown method",
-          isinstance(quantize.validate_inputs(method="Nope"), str))
+    src = execution_get_input_data_probe(apply_node)
+    for label, seen in src:
+        print(f"      {label:<24} validate_inputs sees palette={seen!r}")
+        if label.startswith("wired"):
+            check("a WIRED palette passes validation (it arrives as None, not as empty)",
+                  apply_node.validate_inputs(palette=seen) is True,
+                  f"got {apply_node.validate_inputs(palette=seen)!r} for palette={seen!r}")
+    check("validate_inputs tolerates palette=None (wired / not yet evaluated)",
+          apply_node.validate_inputs(palette=None) is True,
+          repr(apply_node.validate_inputs(palette=None)))
+    check("validate_inputs accepts a real palette",
+          apply_node.validate_inputs(palette=hex_a) is True)
+    check("validate_inputs rejects an empty palette",
+          isinstance(apply_node.validate_inputs(palette=""), str))
+    check("validate_inputs rejects a whitespace-only palette",
+          isinstance(apply_node.validate_inputs(palette="\n  \n"), str))
+
+    # The validator must name ONLY palette, with no **kwargs. Both halves are
+    # load-bearing in execution.py:
+    #   input_filtered is built from argspec.args, and the returned string is
+    #   appended to `errors` once per entry of input_filtered -- so a **kwargs
+    #   validator reports the same message against EVERY input (this is what a
+    #   user actually sees: four identical "palette is required" errors).
+    #   validate_has_kwargs also gates ComfyUI's built-in min/max/options checks,
+    #   so **kwargs silently DISABLES them for the whole node.
+    spec = inspect.getfullargspec(apply_node.validate_inputs)
+    check("validate_inputs takes only palette (no **kwargs), so its error is "
+          "attributed to palette alone",
+          spec.args == ["cls", "palette"] and spec.varkw is None,
+          f"args={spec.args} varkw={spec.varkw}")
+    check("no **kwargs on the validator means ComfyUI's built-in range and combo "
+          "checks are NOT disabled for this node",
+          spec.varkw is None)
 
 
 # --------------------------------------------------------------------------- #
@@ -944,7 +1586,7 @@ def section_alpha(nodes: list) -> None:
 
     by_name = {n.GET_SCHEMA().node_id: n for n in nodes}
     grid = by_name["PixelGridRestore"]
-    quant = by_name["PixelPaletteQuantize"]
+    quant = by_name["PixelPaletteApply"]
     extract = by_name["PixelPaletteExtract"]
     scale = by_name["PixelExportScale"]
 
@@ -954,7 +1596,7 @@ def section_alpha(nodes: list) -> None:
     # -- 11a. RGBA must not raise, and alpha must survive to a 4-channel output
     try:
         out, gw, gh, px, det, conf = grid.execute(
-            image=rgba, sampling="Majority Cluster", grid_mode="Auto Detect"
+            image=rgba, sampling="Majority Cluster", **_mode("Auto Detect")
         ).result
         raised = None
     except Exception as exc:  # noqa: BLE001
@@ -996,30 +1638,30 @@ def section_alpha(nodes: list) -> None:
     opaque = rgba.clone()
     opaque[..., 3] = 1.0
     out_b, *_rest = grid.execute(
-        image=opaque, sampling="Majority Cluster", grid_mode="Auto Detect"
+        image=opaque, sampling="Majority Cluster", **_mode("Auto Detect")
     ).result
     shape_b = tuple(_to_u8(out_b).shape)
     print(f"      all-opaque input -> {shape_b}")
     check("11b all-opaque alpha is dropped (RGB out)", len(shape_b) == 4 and shape_b[-1] == 3,
           f"got {shape_b}")
 
-    # -- 11c. Quantize must pass alpha through byte-for-byte
-    q_out, _q_pal, _q_used = quant.execute(
-        image=out, method="Per-Tile k-means", colors=32, tile_size=cell,
-        space="Lab", dither="None", accent_protect=True, palette="",
-    ).result
-    q_u8 = _to_u8(q_out)
-    check("11c Quantize keeps 4 channels", q_u8.shape[-1] == 4, f"got {q_u8.shape}")
-    if q_u8.shape[-1] == 4:
-        check("11c Quantize leaves alpha byte-identical",
-              np.array_equal(q_u8[..., 3], out_u8[..., 3]), "alpha changed")
-
     # -- 11d. Extract accepts RGBA (and must ignore alpha when choosing colours)
+    # Run before 11c so Apply can be fed a real Extract output on an RGBA image.
     _h, _sw, count = extract.execute(
         image=out, colors=32, method="Per-Tile k-means", space="Lab",
         sort="Luminance", accent_protect=True, tile_size=cell,
     ).result
     check("11d Extract accepts RGBA", count > 0, f"count={count}")
+
+    # -- 11c. Apply must pass alpha through byte-for-byte
+    q_out, _q_pal, _q_used = quant.execute(
+        image=out, palette=_h, space="Lab", dither="None",
+    ).result
+    q_u8 = _to_u8(q_out)
+    check("11c Apply keeps 4 channels", q_u8.shape[-1] == 4, f"got {q_u8.shape}")
+    if q_u8.shape[-1] == 4:
+        check("11c Apply leaves alpha byte-identical",
+              np.array_equal(q_u8[..., 3], out_u8[..., 3]), "alpha changed")
 
     # -- 11e. ExportScale carries alpha through untouched
     sc, sw_w, sc_h = scale.execute(image=out, scale=4, mode="Nearest").result
@@ -1050,7 +1692,32 @@ def main() -> int:
         return 1
     nodes = section_schema(module)
     section_behaviour(nodes, DEFAULT_BASELINE)
+    section_grid_schema(nodes)
+    try:
+        section_grid_contract(nodes)
+    except Exception:
+        traceback.print_exc()
+        _fail("grid runtime-contract section crashed", "see traceback above")
+    try:
+        section_grid_port(nodes, DEFAULT_BASELINE)
+    except Exception:
+        traceback.print_exc()
+        _fail("max_pixel_size port section crashed", "see traceback above")
     section_palette_schema(nodes)
+    section_locale(nodes)
+    for name, fn in (("video schema", section_video_schema),
+                     ("video runtime contract", section_video_contract),
+                     ("video behaviour", section_video_behaviour)):
+        try:
+            fn(nodes)
+        except Exception:
+            traceback.print_exc()
+            _fail(f"{name} section crashed", "see traceback above")
+    try:
+        section_apply_validation(nodes)
+    except Exception:
+        traceback.print_exc()
+        _fail("Apply framework-validation section crashed", "see traceback above")
     try:
         section_palette_behaviour(nodes, DEFAULT_BASELINE.parent)
     except Exception:

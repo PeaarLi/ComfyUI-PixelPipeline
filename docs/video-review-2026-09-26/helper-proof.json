@@ -1,0 +1,24 @@
+{
+  "input_grays": [
+    220,
+    100,
+    10
+  ],
+  "existing_mode_k1": [
+    100,
+    10,
+    10
+  ],
+  "sample_idx_56_stride8": [
+    0,
+    8,
+    16,
+    24,
+    32,
+    40,
+    48
+  ],
+  "ref_pos": 3,
+  "actual_reference_frame": 24,
+  "incorrect_reuse_frame": 3
+}

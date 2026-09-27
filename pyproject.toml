@@ -25,8 +25,14 @@ PublisherId = "your-publisher-id"
 DisplayName = "Pixel Pipeline"
 Icon = ""
 # 0.37.0 is the only version this pack has actually been run against, so the
-# floor states the verified fact rather than a guessed minimum. The V3 schema
-# (comfy_api.latest.ComfyExtension / io), lazy inputs with check_lazy_status,
-# and io.BaseType.Input(advanced=...) are the newest capabilities used here;
-# lower bounds have NOT been tested.
+# floor states the verified fact rather than a guessed minimum. The newest
+# capabilities used here are:
+#   * io.DynamicCombo (grid_mode on PixelGridRestore and PixelVideoGridRestore),
+#     which needs BOTH a backend that serialises COMFY_DYNAMICCOMBO_V3 and a
+#     frontend that renders it -- verified against comfyui-frontend-package
+#     1.53.6, where it also resolves nested widget translations;
+#   * the VIDEO type (io.Video + VideoFromComponents / VideoComponents) used by
+#     PixelVideoGridRestore. Also present in 0.37.0, and likewise only exercised
+#     from core nodes before this pack used it.
+# Lower bounds have NOT been tested.
 requires-comfyui = ">=0.37.0"

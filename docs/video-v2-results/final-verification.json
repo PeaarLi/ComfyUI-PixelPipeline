@@ -1,0 +1,87 @@
+{
+  "comparison.mp4": {
+    "sha256": "a493e38364e0781eae3153960d6d39c9930e0d411b0c5d7dd66d3cf70f638429",
+    "probe": {
+      "programs": [],
+      "stream_groups": [],
+      "streams": [
+        {
+          "codec_type": "video",
+          "width": 2232,
+          "height": 778,
+          "r_frame_rate": "24/1",
+          "nb_frames": "56"
+        },
+        {
+          "codec_type": "audio",
+          "r_frame_rate": "0/0",
+          "nb_frames": "74"
+        }
+      ],
+      "format": {
+        "duration": "2.333333"
+      }
+    }
+  },
+  "restored-palette.mp4": {
+    "sha256": "854cf9ed13f3689249f4a57212a005e3f17fc4339a9b3b6d364f9b1df4473af2",
+    "probe": {
+      "programs": [],
+      "stream_groups": [],
+      "streams": [
+        {
+          "codec_type": "video",
+          "width": 736,
+          "height": 736,
+          "r_frame_rate": "24/1",
+          "nb_frames": "56"
+        },
+        {
+          "codec_type": "audio",
+          "r_frame_rate": "0/0",
+          "nb_frames": "74"
+        }
+      ],
+      "format": {
+        "duration": "2.333333"
+      }
+    }
+  },
+  "restored.mp4": {
+    "sha256": "3838487acdbed366b70131acd0130f8c7bad9521a23acf6be40747b43a3a98c4",
+    "probe": {
+      "programs": [],
+      "stream_groups": [],
+      "streams": [
+        {
+          "codec_type": "video",
+          "width": 736,
+          "height": 736,
+          "r_frame_rate": "24/1",
+          "nb_frames": "56"
+        },
+        {
+          "codec_type": "audio",
+          "r_frame_rate": "0/0",
+          "nb_frames": "74"
+        }
+      ],
+      "format": {
+        "duration": "2.333333"
+      }
+    }
+  },
+  "protected_image_modules_unchanged": [
+    "nodes\\export_scale.py",
+    "nodes\\grid_restore.py",
+    "nodes\\palette.py",
+    "nodes\\_image_utils.py",
+    "nodes\\_palette_utils.py",
+    "nodes\\__init__.py"
+  ],
+  "final_code_sha256": {
+    "nodes\\video_grid_restore.py": "007e62afb1a75028c545c42dcea2349cf79606d4b1337973101f139ae1883253",
+    "nodes\\_video_utils.py": "66f181837077882d011bac6470b2a148e890c09edd0ededa205f43a3889a2246",
+    "web\\video_migration.js": "de4989c526b583cdc02f994b10bed214fcce28559adba19e37768653fc3dd1ff"
+  }
+}

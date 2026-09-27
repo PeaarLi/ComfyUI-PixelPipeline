@@ -1,0 +1,23 @@
+{
+  "date": "2026-09-26",
+  "purpose": "Read-only baseline for video redesign; working tree was already dirty",
+  "code_sha256": {
+    "nodes/export_scale.py": "9ed52a7fecf3e5e8d5befbdcdd4442e423b435f17d62cf32993a3c230e2e6a82",
+    "nodes/grid_restore.py": "b4f1345ae2c5daec5baf030d3e5e1ed07811c923e5f40c19c258b54c3ba1f651",
+    "nodes/palette.py": "38399fedc66e73c9bf9022d585a30439eb26e4add0143183a67e35af49d7898d",
+    "nodes/video_grid_restore.py": "55964abf978ef29edaaf3911aac5c2f842bf855754117af627ec7fd375b7d23f",
+    "nodes/_image_utils.py": "cb050eaba5039122e1fc178e36c7312ceef749882dc8e991c8d6b4230de29f16",
+    "nodes/_palette_utils.py": "9f90815b58e4aa34b5d5f35e287c1c0dbaae5aa2557fdf3b88f78982c6136339",
+    "nodes/__init__.py": "6299096bb2b8c48d412b26103a2cb96af1898390520842203ddccc72076a05a2",
+    "__init__.py": "b63a918ad8796324c56211aace48094967f52d0bcd5c36bb622090a33903eb51",
+    "_selftest.py": "18195ed176cbc357d8277050bb0af5bdd353a59356f0dc3d3bb328a897d49e64",
+    "requirements.txt": "e4e69b84c28e77edd2e57da35b4fd1b3a9ced3c7b2c213f271b88335caf2b7b4",
+    "locales/zh/nodeDefs.json": "d9472abee5d286fd33c56545c211db82b938f207178e07562400b3f5e880acd1"
+  },
+  "media_sha256": {
+    "E:\\ComfyUI\\output\\video\\MiniMax_H3_00008_.mp4": "e5cb19e1eff265b20df12b1c69d57876374d0300b5807bdd422d236445db05c5",
+    "E:\\ComfyUI\\output\\h3_08_ps3_nopal_tw0.mp4": "1c04ad99e809a524c1df5c21893b050b838175951efb75b040f941860c9c2484",
+    "E:\\ComfyUI\\output\\h3_08_nopal_ps3.mp4": "bd3427f7fd41f2d0f396bda06a231c3c1de9055942128a7984124dfdfd92c2b5",
+    "E:\\ComfyUI\\output\\h3_08_pixel_ps3.mp4": "4ed8e150410c9dfaa714c2da7185351c2c3bf43a438e5da95a8f470ac087957a"
+  }
+}

@@ -8,19 +8,22 @@ from __future__ import annotations
 
 from .export_scale import PixelExportScale
 from .grid_restore import PixelGridRestore
-from .palette import PixelPaletteExtract, PixelPaletteQuantize
+from .palette import PixelPaletteApply, PixelPaletteExtract
+from .video_grid_restore import PixelVideoGridRestore
 
 ALL_NODES: list[type] = [
     PixelGridRestore,
+    PixelVideoGridRestore,
     PixelPaletteExtract,
-    PixelPaletteQuantize,
+    PixelPaletteApply,
     PixelExportScale,
 ]
 
 __all__ = [
     "ALL_NODES",
     "PixelGridRestore",
+    "PixelVideoGridRestore",
     "PixelPaletteExtract",
-    "PixelPaletteQuantize",
+    "PixelPaletteApply",
     "PixelExportScale",
 ]

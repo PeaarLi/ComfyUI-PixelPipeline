@@ -21,7 +21,20 @@ make it unusable directly from a node:
    projection is a 2-wide plateau and peak detection uses a strict ``>``).
    The escape hatch is passing ``grid_size=(grid_w, grid_h)`` explicitly, which
    skips both detectors entirely and goes straight to ``refine_grids``. This
-   node exposes that escape hatch as ``grid_mode``.
+   node exposes that escape hatch as the ``By Pixel Size`` / ``By Grid Count``
+   options of ``grid_mode``.
+   The 20 px half of that window is the more insidious failure, because it is
+   silent: ``max_pixel_size = 20.0`` is a **local variable inside**
+   ``detect_grid_scale`` (``perfect_pixel.py:333``), so an image whose cells are
+   genuinely wider than 20 px has its (correct) FFT result discarded by the gate
+   and handed to the gradient fallback, which has **no validity gate at all**
+   and invents a pitch. Measured: a 1024 px image with coarse cells came back as
+   a 205-cell grid at exactly 5.00 px, raised nothing, and was saved. The gate is
+   an OR of four conditions, so no combination of ``min_size`` / ``max_ratio``
+   can defeat it -- which is why this node ports the function (see
+   :func:`_detect_grid_scale_port`) to expose ``max_pixel_size``. That ceiling
+   was hidden while ``min_size``, the parameter that *loosens* the gate, was
+   exposed: half the control, and the wrong half.
 3. **``grid_size`` is a cell COUNT, not a pixel edge length.** Upstream calls it
    ``scale_col, scale_row`` and feeds it to ``refine_grids(image, size_x, ...)``
    where ``cell_w = W / grid_x``. So ``By Pixel Size`` has to convert:
@@ -72,6 +85,34 @@ SAMPLING_OPTIONS = ["Majority Cluster", "Center Sample", "Median"]
 GRID_MODE_OPTIONS = ["Auto Detect", "By Pixel Size", "By Grid Count"]
 BACKEND_OPTIONS = ["Auto", "OpenCV", "Lightweight"]
 
+# Schema defaults, kept in one place so ``define_schema`` and the execute-side
+# unpacking of the DynamicCombo dict cannot drift apart. ``_selftest.py``
+# asserts the schema defaults equal these.
+DEFAULT_MIN_SIZE = 4.0
+DEFAULT_MAX_PIXEL_SIZE = 20.0
+DEFAULT_PEAK_WIDTH = 6
+DEFAULT_PIXEL_SIZE = 16
+DEFAULT_GRID_W = 64
+DEFAULT_GRID_H = 64
+
+#: Upstream's own hardcoded ceiling (``perfect_pixel.py:333``). Kept as a named
+#: constant because it is the identity anchor for the whole ``max_pixel_size``
+#: feature: when the user leaves the parameter at this value we call upstream's
+#: own detector and the output is unchanged *by construction*, not by test.
+UPSTREAM_MAX_PIXEL_SIZE = 20.0
+
+#: Upstream's hardcoded aspect-ratio gate. Deliberately NOT exposed: non-square
+#: pixels are rare in AI pixel art, and the point of this refactor is fewer
+#: knobs, not more. Passed through explicitly so the port cannot drift from it.
+UPSTREAM_MAX_RATIO = 1.5
+
+#: Seed forced into OpenCV before every sampler call. See :func:`_seed_sampler`.
+#: Deliberately the same value as ``_palette_utils.KMEANS_SEED`` so the pack has
+#: one "fixed seed" idea -- but NOT imported from there, because that would drag
+#: PIL into this module's dependency graph for a single integer. ``_selftest.py``
+#: asserts the two stay equal.
+SAMPLE_SEED = 0x5EED_1234
+
 # Node-facing label -> upstream ``sample_method`` value.
 _SAMPLE_METHOD = {
     "Majority Cluster": "majority",
@@ -101,11 +142,27 @@ _INSTALL_HINT = 'pip install "perfect-pixel[opencv]"'
 # reported clearly instead of failing with an AttributeError deep in the call.
 _REQUIRED_UPSTREAM_OPS = (
     "detect_grid_scale",
+    "estimate_grid_fft",
+    "estimate_grid_gradient",
     "refine_grids",
     "sample_majority",
     "sample_median",
     "sample_center",
 )
+
+#: Extra symbols only one backend needs. ``rgb_to_gray`` lives only in the no-CV2
+#: module (the OpenCV one inlines ``cv2.cvtColor`` inside ``detect_grid_scale``),
+#: so listing it per backend keeps the failure a named "missing op" rather than
+#: an ``AttributeError`` deep inside the driver.
+_BACKEND_EXTRA_OPS = {
+    "Lightweight": ("rgb_to_gray",),
+}
+
+# ``detect_grid_scale`` is still required even though ``_detect_grid_scale``
+# prefers the port whenever the ceiling is not at its default: the port mirrors
+# that function, the fast path calls it, and ``_selftest.py`` diffs the two
+# against each other. Its absence would mean the contract the port implements no
+# longer exists.
 
 
 def _import_backend(backend: str):
@@ -123,7 +180,8 @@ def _import_backend(backend: str):
             f" 请先安装依赖: {_INSTALL_HINT}"
         ) from exc
 
-    missing = [name for name in _REQUIRED_UPSTREAM_OPS if not hasattr(module, name)]
+    wanted = _REQUIRED_UPSTREAM_OPS + _BACKEND_EXTRA_OPS.get(backend, ())
+    missing = [name for name in wanted if not hasattr(module, name)]
     if missing:
         raise RuntimeError(
             f"PixelGridRestore: 后端 {backend!r} ({module_name}) 缺少本节点需要的上游函数 "
@@ -148,40 +206,252 @@ def _resolve_backend(backend: str):
     return resolved, _import_backend(resolved)
 
 
+#: Why the Lightweight backend cannot auto-detect. Shared by the pre-flight
+#: check in ``execute`` and by ``_backend_hint`` so the two can never drift into
+#: telling the user two different stories about the same bug.
+_LIGHTWEIGHT_WHY = (
+    " The Lightweight (no-CV2) backend has a known upstream crash: its "
+    "estimate_grid_fft() returns a bare None when it cannot find harmonics, while its own caller "
+    "unpacks the result as a 2-tuple (perfect_pixel_noCV2.py:380) -- so it dies instead of falling "
+    "back to the gradient detector."
+)
+
+
 def _backend_hint(backend_label: str, exc: BaseException) -> str:
     """Extra advice for the Lightweight backend's no-CV2 crash, when it fires."""
     if backend_label != "Lightweight" or not isinstance(exc, TypeError):
         return ""
-    return (
-        " The Lightweight (no-CV2) backend has a known upstream crash: its "
-        "estimate_grid_fft() returns a bare None when it cannot find harmonics, while its own caller "
-        "unpacks the result as a 2-tuple (perfect_pixel_noCV2.py:380) -- so it dies instead of falling "
-        "back to the gradient detector. Switch backend to 'OpenCV', or use grid_mode='By Pixel Size' / "
+    return _LIGHTWEIGHT_WHY + (
+        " Switch backend to 'OpenCV', or use grid_mode='By Pixel Size' / "
         "'By Grid Count', which skip detection entirely."
     )
 
 
+def _unpack_grid_mode(grid_mode) -> tuple[str, dict]:
+    """Normalise what ComfyUI hands to ``execute`` for the ``grid_mode`` combo.
+
+    Verified against this build by driving ``_io.get_finalized_class_inputs`` +
+    ``_io.build_nested_inputs`` -- the same two calls ``execution.py`` makes::
+
+        {"grid_mode": "Auto Detect", "grid_mode.min_size": 4}
+            -> {"grid_mode": {"grid_mode": "Auto Detect", "min_size": 4}}
+
+    So the selected option key arrives *inside* the input's own value, alongside
+    that option's nested widget values -- the same shape core's
+    ``SaveAudioAdvanced`` reads with ``format.get("format")``.
+
+    Two shapes must not raise:
+
+    * ``None`` -- the prompt carried no ``grid_mode`` key at all (hand-written
+      API prompts, or calling ``execute`` from Python). Behaves as Auto Detect
+      with the schema defaults.
+    * a bare ``str`` -- an option key that matched no declared option. Nothing
+      in the backend validates a combo's value, so it arrives as a plain string;
+      it is reported as an unknown mode by the caller.
+    """
+    if isinstance(grid_mode, str):
+        return grid_mode, {}
+    if not grid_mode:
+        return "Auto Detect", {}
+    mode = grid_mode.get("grid_mode")
+    return (mode if isinstance(mode, str) else "Auto Detect"), grid_mode
+
+
+def _pick(params: dict, key: str, fallback):
+    """A nested option's value, or the schema default when it was not sent.
+
+    ``build_nested_inputs()`` writes ``None`` for a nested key the prompt omitted
+    and does *not* apply the schema default (verified against this build), so the
+    fallback has to be applied here. The test is an explicit ``is None`` rather
+    than ``or``: ``or`` would silently rewrite a legitimate ``0`` or ``False``.
+    """
+    value = params.get(key, None)
+    return fallback if value is None else value
+
+
+def _backend_gray(module, backend_label: str, rgb: np.ndarray) -> np.ndarray:
+    """The backend's own grayscale step, reproduced exactly.
+
+    The two backends do NOT agree here, and the FFT validity gate is calibrated
+    against whichever one is in play, so this must not be unified:
+
+    * ``OpenCV`` -- ``perfect_pixel.py:323`` calls ``cv2.cvtColor`` on an **RGB**
+      array with ``COLOR_BGR2GRAY``. That is upstream bug #2 (the R and B weights
+      are swapped) and it is deliberately NOT "fixed" here: correcting it changes
+      which detections pass the gate, and therefore changes the output of the
+      default configuration, which is exactly what this refactor promises not to
+      do. Fixing it is a separate decision, not a side effect of exposing a
+      number.
+    * ``Lightweight`` -- ``perfect_pixel_noCV2.py:376`` calls the module's own
+      ``rgb_to_gray``, which uses correct Rec.601 weights. That module does not
+      import cv2 at all.
+    """
+    if backend_label == "OpenCV":
+        cv = getattr(module, "cv2", None)
+        if cv is None:  # pragma: no cover - the module imports cv2 itself
+            import cv2 as cv
+        return cv.cvtColor(rgb, cv.COLOR_BGR2GRAY)
+    return module.rgb_to_gray(rgb)
+
+
+def _auto_detect_usable(module) -> bool:
+    """Can this backend reach the gradient fallback in Auto Detect?
+
+    The no-CV2 backend's ``estimate_grid_fft`` returns a bare ``None`` when it
+    finds no harmonics, while its own caller at ``perfect_pixel_noCV2.py:380``
+    unpacks the result as a 2-tuple -- so it raises ``TypeError`` instead of
+    falling back, and cannot auto-detect most AI output at all.
+
+    Probed *behaviourally* rather than by version or backend name, so that if
+    upstream ever fixes the bug this restriction simply stops applying. A
+    constant image is used because neither implementation can find harmonics in
+    one: the cv2 module returns ``(None, None)``, the no-CV2 module returns
+    ``None``. Costs one 8x8 FFT.
+    """
+    probe = np.zeros((8, 8), dtype=np.float32)
+    try:
+        return isinstance(module.estimate_grid_fft(probe), tuple)
+    except Exception:  # noqa: BLE001 -- any failure means "cannot rely on it"
+        return False
+
+
+def _detect_grid_scale_port(
+    module,
+    backend_label: str,
+    rgb: np.ndarray,
+    *,
+    peak_width: int,
+    min_size: float,
+    max_pixel_size: float,
+    max_ratio: float = UPSTREAM_MAX_RATIO,
+) -> tuple[int, int] | tuple[None, None]:
+    """A line-for-line port of upstream's ``detect_grid_scale`` with the ceiling exposed.
+
+    Ported from ``perfect_pixel.py:322-355`` because ``max_pixel_size`` is a
+    *local variable* inside that function (``:333``) with no module-level
+    attribute to patch and no parameter to pass. The gate is an OR of four
+    conditions, so nothing short of replacing the function can raise it --
+    ``min_size`` and ``max_ratio`` cannot defeat it.
+
+    Everything else is reproduced verbatim, including the two ``print()``
+    diagnostics (the user reads their log through those exact lines) and the
+    final ``int(round(W / pixel_size))`` normalisation. Two details look like
+    tidy-up opportunities and are not:
+
+    * The FFT result is NOT re-rounded. The cv2 estimator returns ints but the
+      no-CV2 one returns **unrounded floats** on success, so an ``int(round(x))``
+      here would make the Lightweight backend diverge.
+    * The gradient fallback gets no validity gate of its own. Upstream has none
+      (see the module docstring); adding one would change the default behaviour
+      for every image that falls through, which the fast path in
+      :func:`_detect_grid_scale` exists to avoid.
+
+    Returns ``(grid_w, grid_h)`` or ``(None, None)``, upstream's own convention.
+    """
+    gray = _backend_gray(module, backend_label, rgb)
+    height, width = gray.shape
+
+    result = module.estimate_grid_fft(gray, peak_width=peak_width)
+    # No-CV2 signals failure with a bare None; cv2 with (None, None). Normalise
+    # both rather than letting the bare None raise on unpack.
+    grid_w, grid_h = (None, None) if result is None else result
+
+    if grid_w is None or grid_h is None:
+        print("FFT-based grid estimation failed, fallback to gradient-based method.")
+        grid_w, grid_h = module.estimate_grid_gradient(gray)
+    else:
+        pixel_size_x = width / grid_w
+        pixel_size_y = height / grid_h
+        if (
+            min(pixel_size_x, pixel_size_y) < min_size
+            or max(pixel_size_x, pixel_size_y) > max_pixel_size
+            or pixel_size_x / pixel_size_y > max_ratio
+            or pixel_size_y / pixel_size_x > max_ratio
+        ):
+            print("Inconsistent grid size detected (FFT-based), fallback to gradient-based method.")
+            grid_w, grid_h = module.estimate_grid_gradient(gray)
+
+    if grid_w is None or grid_h is None:
+        print("Gradient-based grid estimation failed.")
+        return None, None
+
+    pixel_size_x = width / grid_w
+    pixel_size_y = height / grid_h
+
+    if pixel_size_x / pixel_size_y > max_ratio or pixel_size_y / pixel_size_x > max_ratio:
+        pixel_size = min(pixel_size_x, pixel_size_y)
+    else:
+        pixel_size = (pixel_size_x + pixel_size_y) / 2.0
+
+    print(f"Detected pixel size: {pixel_size:.2f}")
+
+    return int(round(width / pixel_size)), int(round(height / pixel_size))
+
+
+def _detect_grid_scale(
+    module,
+    backend_label: str,
+    rgb: np.ndarray,
+    *,
+    peak_width: int,
+    min_size: float,
+    max_pixel_size: float,
+    max_ratio: float = UPSTREAM_MAX_RATIO,
+) -> tuple[int, int] | tuple[None, None]:
+    """Upstream's detector when it is trustworthy and unmodified; ours otherwise.
+
+    The fast path is the entire reason "byte-identical at the default" is true
+    *by construction* rather than by measurement: at
+    ``max_pixel_size == UPSTREAM_MAX_PIXEL_SIZE`` the port has nothing to add, so
+    upstream's own code runs and there is no ported behaviour to trust. The port
+    is reached only when the user has moved the ceiling.
+
+    The ``_auto_detect_usable`` clause is belt and braces rather than a live
+    branch: by the time ``execute`` gets here its pre-flight has already refused
+    a backend that cannot auto-detect, so this is always True in the node's own
+    flow. It matters for direct callers (``_selftest.py`` drives this function
+    across both backends) and it keeps the invariant local: never hand a
+    detection job to a detector known to crash on it.
+    """
+    if max_pixel_size == UPSTREAM_MAX_PIXEL_SIZE and _auto_detect_usable(module):
+        return module.detect_grid_scale(
+            rgb, peak_width=peak_width, max_ratio=max_ratio, min_size=min_size
+        )
+    return _detect_grid_scale_port(
+        module,
+        backend_label,
+        rgb,
+        peak_width=peak_width,
+        min_size=min_size,
+        max_pixel_size=max_pixel_size,
+        max_ratio=max_ratio,
+    )
+
+
 def _resolve_grid_size(
-    grid_mode: str,
-    pixel_size: int,
-    grid_w: int,
-    grid_h: int,
+    mode: str,
+    params: dict,
     width: int,
     height: int,
+    node_label: str = "PixelGridRestore",
 ) -> tuple[int, int] | None:
     """Build the upstream ``grid_size`` argument, or ``None`` for auto-detect.
 
     The conversion for ``By Pixel Size`` is the load-bearing part: upstream's
     ``grid_size`` is a *cell count*, not a pixel edge length, so
     ``grid_w = round(W / pixel_size)``.
+
+    ``node_label`` only affects the message prefix, so the video node's errors
+    name the video node. The default keeps the still node's wording unchanged.
     """
-    if grid_mode == "Auto Detect":
+    if mode == "Auto Detect":
         return None
 
-    if grid_mode == "By Pixel Size":
+    if mode == "By Pixel Size":
+        pixel_size = _pick(params, "pixel_size", DEFAULT_PIXEL_SIZE)
         if pixel_size < 1:
             raise ValueError(
-                f"PixelGridRestore: pixel_size must be >= 1, got {pixel_size}. "
+                f"{node_label}: pixel_size must be >= 1, got {pixel_size}. "
                 "It is the target edge length of one pixel-art cell, in pixels."
             )
         # round() here, not ceil/floor: upstream refines the grid anyway and a
@@ -191,15 +461,17 @@ def _resolve_grid_size(
             max(1, int(round(height / pixel_size))),
         )
 
-    if grid_mode == "By Grid Count":
+    if mode == "By Grid Count":
+        grid_w = int(_pick(params, "grid_w", DEFAULT_GRID_W))
+        grid_h = int(_pick(params, "grid_h", DEFAULT_GRID_H))
         if grid_w < 1 or grid_h < 1:
             raise ValueError(
-                f"PixelGridRestore: grid_w/grid_h must be >= 1, got ({grid_w}, {grid_h})."
+                f"{node_label}: grid_w/grid_h must be >= 1, got ({grid_w}, {grid_h})."
             )
-        return int(grid_w), int(grid_h)
+        return grid_w, grid_h
 
     raise ValueError(
-        f"PixelGridRestore: unknown grid_mode {grid_mode!r}; expected one of {GRID_MODE_OPTIONS}."
+        f"{node_label}: unknown grid_mode {mode!r}; expected one of {GRID_MODE_OPTIONS}."
     )
 
 
@@ -310,24 +582,80 @@ def _fix_square_pair(
     return rgb, alpha
 
 
+def _seed_sampler(module) -> None:
+    """Force a known OpenCV RNG state immediately before a sampler call.
+
+    Why this exists: OpenCV's ``sample_majority`` does its per-cell 2-means with
+    ``cv2.kmeans(..., cv2.KMEANS_RANDOM_CENTERS)`` and never seeds it, so **the
+    same cell can come back differently on every call**. Measured on this install:
+
+    * six consecutive ``sample_majority`` calls on ONE image -> five results
+      differing from the first (188-218 channel values);
+    * two frames with **byte-identical** content -> 74 cells differing.
+
+    The second one is not a cosmetic wart. A batch -- or a video -- whose frames
+    flicker because the *sampler* is nondeterministic cannot be repaired by any
+    amount of temporal filtering afterwards: the flicker is already baked into
+    the pixels. Seeding here is the largest single flicker reduction available,
+    and it costs one line.
+
+    Only the OpenCV backend needs it. ``perfect_pixel_noCV2`` never imports cv2 --
+    its 2-means is a deterministic argmax/mean iteration -- so there is nothing to
+    seed there, and cv2 may not even be installed. (The two backends also default
+    their *numpy* seed differently: ``sample_majority`` takes ``seed=42`` in the
+    cv2 module but ``seed=0`` in the no-CV2 one. That is upstream's, not ours.)
+
+    Note this makes ``PixelGridRestore`` reproducible for the first time, which
+    *changes its output* for a given input. That is a behaviour change to a
+    shipped node and is called out in the README.
+    """
+    cv = getattr(module, "cv2", None)
+    if cv is not None:
+        cv.setRNGSeed(SAMPLE_SEED)
+
+
+def _refine_once(
+    module,
+    rgb: np.ndarray,
+    grid_w: int,
+    grid_h: int,
+    refine_intensity: float,
+) -> tuple[list, list]:
+    """``refine_grids`` on ONE reference frame, for reuse across many frames.
+
+    Kept in this module so the coupling to upstream's operator name lives in one
+    place. ``PixelVideoGridRestore`` calls it once and then hands the resulting
+    coordinates to :func:`_pixelate` for every frame, which is what makes the
+    whole clip share one geometry -- see that node for the trade-off.
+    """
+    return module.refine_grids(rgb, int(grid_w), int(grid_h), refine_intensity)
+
+
 def _pixelate(
     module,
+    backend_label: str,
     rgb: np.ndarray,
     alpha: np.ndarray | None,
     sample_method: str,
     grid_size: tuple[int, int] | None,
     min_size: float,
+    max_pixel_size: float,
     peak_width: int,
     refine_intensity: float,
     fix_square: bool,
+    coords: tuple[list, list] | None = None,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     """Drive upstream's detection / refinement / sampling, keeping alpha aligned.
 
     This mirrors ``perfect_pixel.get_perfect_pixel`` (``perfect_pixel.py:384-429``)
-    step for step -- same ``detect_grid_scale`` arguments including the hardcoded
-    ``max_ratio=1.5``, same ``refine_grids``, same sampler, same ``fix_square``.
-    It was checked to reproduce ``get_perfect_pixel`` byte-for-byte on a
-    synthetic grid, and ``_selftest.py`` re-checks it against the real baseline.
+    step for step -- same ``max_ratio=1.5``, same ``refine_grids``, same sampler,
+    same ``fix_square``. It was checked to reproduce ``get_perfect_pixel``
+    byte-for-byte on a synthetic grid, and ``_selftest.py`` re-checks it against
+    the real baseline.
+
+    Detection goes through :func:`_detect_grid_scale` rather than straight to
+    ``module.detect_grid_scale``, which at the default ``max_pixel_size`` is the
+    same call -- see that function for why the ceiling has to be a parameter.
 
     The one deliberate difference is that the grid coordinates are reused for
     alpha instead of being recomputed, which is the entire reason for not just
@@ -335,19 +663,32 @@ def _pixelate(
 
     Returns ``(rgb_out, alpha_out)``, or ``(None, None)`` on detection failure --
     upstream's own convention, preserved so the caller's error path is unchanged.
-    """
-    if grid_size is not None:
-        scale_col, scale_row = grid_size
-    else:
-        scale_col, scale_row = module.detect_grid_scale(
-            rgb, peak_width=peak_width, max_ratio=1.5, min_size=min_size
-        )
-        if scale_col is None or scale_row is None:
-            return None, None
 
-    size_x = int(round(scale_col))
-    size_y = int(round(scale_row))
-    x_coords, y_coords = module.refine_grids(rgb, size_x, size_y, refine_intensity)
+    ``coords`` short-circuits both detection *and* refinement, resampling onto
+    coordinates the caller already has. ``PixelVideoGridRestore`` uses it to put
+    a whole clip on one shared geometry; passing it makes this function's
+    sampling step byte-identical to the normal path, because it is the same code.
+    """
+    if coords is not None:
+        x_coords, y_coords = coords
+    else:
+        if grid_size is not None:
+            scale_col, scale_row = grid_size
+        else:
+            scale_col, scale_row = _detect_grid_scale(
+                module,
+                backend_label,
+                rgb,
+                peak_width=peak_width,
+                min_size=min_size,
+                max_pixel_size=max_pixel_size,
+            )
+            if scale_col is None or scale_row is None:
+                return None, None
+
+        size_x = int(round(scale_col))
+        size_y = int(round(scale_row))
+        x_coords, y_coords = _refine_once(module, rgb, size_x, size_y, refine_intensity)
 
     refined_w = len(x_coords) - 1
     refined_h = len(y_coords) - 1
@@ -358,12 +699,15 @@ def _pixelate(
         "center": module.sample_center,
     }[sample_method]
 
+    # Before EVERY sampler call -- see _seed_sampler for why this is not optional.
+    _seed_sampler(module)
     rgb_out = sampler(rgb, x_coords, y_coords)
 
     alpha_out = None
     if alpha is not None:
         # Replicated to 3 channels so the identical sampler can be reused; the
         # three copies are equal, so whichever one it picks back is alpha.
+        _seed_sampler(module)
         alpha_out = sampler(np.repeat(alpha, 3, axis=2), x_coords, y_coords)[..., :1]
 
     if fix_square and abs(refined_w - refined_h) == 1:
@@ -407,45 +751,125 @@ class PixelGridRestore(io.ComfyNode):
                         "the V1 node)."
                     ),
                 ),
-                io.Combo.Input(
+                # The mode selector and that mode's parameters in ONE control.
+                # Only the selected option's inputs are shown, so no dead knob is
+                # ever on screen -- and each mode remembers its own values while
+                # the session lasts.
+                #
+                # Two hard constraints, both verified against this build:
+                #  * DynamicCombo.Input takes NO `advanced` kwarg. Passing one
+                #    raises TypeError at import, which ComfyUI swallows into a
+                #    single log warning -- the whole pack then silently vanishes.
+                #  * It takes NO `default` kwarg either, so a freshly added node
+                #    shows whatever the frontend picks. The only safe construction
+                #    is to put the intended default first, which is why
+                #    'Auto Detect' is options[0]; _selftest.py pins that order.
+                io.DynamicCombo.Input(
                     "grid_mode",
-                    options=GRID_MODE_OPTIONS,
-                    default="Auto Detect",
+                    options=[
+                        io.DynamicCombo.Option(
+                            "Auto Detect",
+                            [
+                                io.Float.Input(
+                                    "min_size",
+                                    default=DEFAULT_MIN_SIZE,
+                                    min=1.0,
+                                    max=64.0,
+                                    step=0.5,
+                                    tooltip=(
+                                        "Minimum accepted pixel edge length, in pixels. A detection "
+                                        "implying a smaller edge is rejected and falls through to the "
+                                        "gradient detector, which has no validity gate of its own -- so "
+                                        "raising this does not make detection stricter, it makes it "
+                                        "depend on the ungated fallback instead."
+                                    ),
+                                ),
+                                io.Float.Input(
+                                    "max_pixel_size",
+                                    default=DEFAULT_MAX_PIXEL_SIZE,
+                                    min=1.0,
+                                    max=512.0,
+                                    step=0.5,
+                                    tooltip=(
+                                        "Maximum accepted pixel edge length, in pixels. 20.0 is upstream "
+                                        "perfect-pixel's own hardcoded ceiling and is what this node uses "
+                                        "when you leave it alone. Raise it when the art's cells are wider "
+                                        "than 20 px: otherwise the FFT result -- which may well be the "
+                                        "correct one -- is thrown away and the ungated gradient detector "
+                                        "invents a pitch instead (observed on a 1024 px image: the real "
+                                        "cells were coarser than 20 px and the fallback returned a 205-cell "
+                                        "grid at 5.00 px, with nothing raising). CAUTION, measured: "
+                                        "raising the ceiling also lets aliased FFT estimates through, so "
+                                        "some loud failures become quiet wrong answers. Watch the "
+                                        "'confidence' output. Lower it below min_size to skip the FFT "
+                                        "detector entirely."
+                                    ),
+                                ),
+                                io.Int.Input(
+                                    "peak_width",
+                                    default=DEFAULT_PEAK_WIDTH,
+                                    min=1,
+                                    max=64,
+                                    step=1,
+                                    tooltip=(
+                                        "Minimum peak width for FFT harmonic peak detection. Lower finds "
+                                        "narrower harmonics (noisier); higher demands broader ones."
+                                    ),
+                                ),
+                            ],
+                        ),
+                        io.DynamicCombo.Option(
+                            "By Pixel Size",
+                            [
+                                io.Int.Input(
+                                    "pixel_size",
+                                    default=DEFAULT_PIXEL_SIZE,
+                                    min=1,
+                                    max=512,
+                                    step=1,
+                                    tooltip=(
+                                        "Target edge length of one pixel-art cell, in input pixels. "
+                                        "Converted internally to a cell count with "
+                                        "grid_w = round(W / pixel_size), grid_h = round(H / pixel_size) -- "
+                                        "upstream's grid_size is a cell COUNT, not an edge length. This "
+                                        "mode skips detection entirely and is the reliable path."
+                                    ),
+                                ),
+                            ],
+                        ),
+                        io.DynamicCombo.Option(
+                            "By Grid Count",
+                            [
+                                io.Int.Input(
+                                    "grid_w",
+                                    default=DEFAULT_GRID_W,
+                                    min=1,
+                                    max=4096,
+                                    step=1,
+                                    tooltip=(
+                                        "Number of cells across the image width. Skips detection entirely. "
+                                        "Use this when you know the art's resolution rather than its scale."
+                                    ),
+                                ),
+                                io.Int.Input(
+                                    "grid_h",
+                                    default=DEFAULT_GRID_H,
+                                    min=1,
+                                    max=4096,
+                                    step=1,
+                                    tooltip="Number of cells down the image height. Matched with grid_w.",
+                                ),
+                            ],
+                        ),
+                    ],
                     tooltip=(
-                        "How the grid is determined. 'Auto Detect' runs upstream FFT + gradient detection, "
-                        "which often fails on AI art (blocks wider than 20 px, soft edges) -- it then raises "
-                        "here. 'By Pixel Size' and 'By Grid Count' pass an explicit grid and skip detection "
-                        "entirely, which is the reliable path."
+                        "How the grid is determined, and the parameters that mode needs -- only the "
+                        "selected mode's controls are shown. 'Auto Detect' runs upstream FFT + gradient "
+                        "detection. 'By Pixel Size' and 'By Grid Count' pass an explicit grid and skip "
+                        "detection entirely, which is the reliable path. Each mode keeps its own values "
+                        "while the session lasts, but only the selected mode's values are saved into a "
+                        "workflow."
                     ),
-                ),
-                io.Int.Input(
-                    "pixel_size",
-                    default=16,
-                    min=1,
-                    max=512,
-                    step=1,
-                    tooltip=(
-                        "Only used by grid_mode='By Pixel Size'. Target edge length of one pixel-art cell "
-                        "in input pixels. Converted internally to a cell count with "
-                        "grid_w = round(W / pixel_size), grid_h = round(H / pixel_size) -- upstream's "
-                        "grid_size is a cell COUNT, not an edge length."
-                    ),
-                ),
-                io.Int.Input(
-                    "grid_w",
-                    default=64,
-                    min=1,
-                    max=4096,
-                    step=1,
-                    tooltip="Only used by grid_mode='By Grid Count'. Number of cells across the image width.",
-                ),
-                io.Int.Input(
-                    "grid_h",
-                    default=64,
-                    min=1,
-                    max=4096,
-                    step=1,
-                    tooltip="Only used by grid_mode='By Grid Count'. Number of cells down the image height.",
                 ),
                 io.Combo.Input(
                     "backend",
@@ -463,6 +887,10 @@ class PixelGridRestore(io.ComfyNode):
                     ),
                 ),
                 # --- advanced (collapsed by default) -------------------------------
+                # Only these two stay at top level: they apply to every grid mode.
+                # min_size / peak_width / max_pixel_size moved into the Auto Detect
+                # option above, because _pixelate only passes them to the detector
+                # -- they are inert in the two manual modes.
                 io.Float.Input(
                     "refine_intensity",
                     default=0.25,
@@ -471,29 +899,9 @@ class PixelGridRestore(io.ComfyNode):
                     step=0.01,
                     tooltip=(
                         "Advanced. Grid-refinement search radius. Each estimated grid line at x is snapped "
-                        "within [x*(1-r), x*(1+r)]. Upstream recommends 0.0-0.5."
+                        "within [x*(1-r), x*(1+r)]. Upstream recommends 0.0-0.5. Applies to all three grid "
+                        "modes, not just Auto Detect."
                     ),
-                    advanced=True,
-                ),
-                io.Float.Input(
-                    "min_size",
-                    default=4.0,
-                    min=1.0,
-                    max=64.0,
-                    step=0.5,
-                    tooltip=(
-                        "Advanced. Minimum accepted pixel edge length, in pixels. Only affects Auto Detect; "
-                        "detections implying a smaller edge are rejected and fall back to the gradient method."
-                    ),
-                    advanced=True,
-                ),
-                io.Int.Input(
-                    "peak_width",
-                    default=6,
-                    min=1,
-                    max=64,
-                    step=1,
-                    tooltip="Advanced. Minimum peak width for FFT harmonic peak detection. Auto Detect only.",
                     advanced=True,
                 ),
                 io.Boolean.Input(
@@ -547,10 +955,13 @@ class PixelGridRestore(io.ComfyNode):
                         "9.1-57.8 for real grids. Nothing is blocked on this value -- gate it yourself if you "
                         "want. Calibrated on six reference images with no sample between 2.6 and 9.1, so the "
                         "middle of the range is interpolated rather than measured. In a batch this is the "
-                        "minimum across images. EXPECT 0 ON THE MANUAL MODES: with 'By Pixel Size' / "
-                        "'By Grid Count' you are overriding the pitch, and a forced pitch usually does not "
-                        "match the image's own periodicity -- so the score correctly answers 'no grid at this "
-                        "pitch'. That is information, not a failure; the grid is still applied as you asked."
+                        "minimum across images. THE MANUAL MODES ARE SCORED TOO -- this used to claim they "
+                        "always read 0, and that was wrong: the value is computed in every mode, so a forced "
+                        "grid that genuinely matches the content scores high (measured 1.000 when a true "
+                        "96-cell grid was requested as 96x96). Read 'detected=False' together with a HIGH "
+                        "confidence as 'your forced grid agrees with the content' -- useful information. It "
+                        "reads low only when a forced pitch does not match the image's own periodicity, and "
+                        "that is not a failure either; the grid is applied as you asked."
                     ),
                 ),
             ],
@@ -561,14 +972,9 @@ class PixelGridRestore(io.ComfyNode):
         cls,
         image: torch.Tensor,
         sampling: str = "Majority Cluster",
-        grid_mode: str = "Auto Detect",
-        pixel_size: int = 16,
-        grid_w: int = 64,
-        grid_h: int = 64,
+        grid_mode=None,
         backend: str = "Auto",
         refine_intensity: float = 0.25,
-        min_size: float = 4.0,
-        peak_width: int = 6,
         fix_square: bool = True,
     ) -> io.NodeOutput:
         try:
@@ -578,8 +984,35 @@ class PixelGridRestore(io.ComfyNode):
                 f"PixelGridRestore: unknown sampling {sampling!r}; expected one of {SAMPLING_OPTIONS}."
             ) from None
 
+        mode, params = _unpack_grid_mode(grid_mode)
+        if mode not in GRID_MODE_OPTIONS:
+            raise ValueError(
+                f"PixelGridRestore: unknown grid_mode {mode!r}; expected one of {GRID_MODE_OPTIONS}."
+            )
+
+        # The Auto-only parameters. _pick falls back to the schema defaults when
+        # the option's keys are absent, which is the normal case for the manual
+        # modes -- they never send them.
+        min_size = float(_pick(params, "min_size", DEFAULT_MIN_SIZE))
+        max_pixel_size = float(_pick(params, "max_pixel_size", DEFAULT_MAX_PIXEL_SIZE))
+        peak_width = int(_pick(params, "peak_width", DEFAULT_PEAK_WIDTH))
+
         backend_label, upstream = _resolve_backend(backend)
-        detected = grid_mode == "Auto Detect"
+        detected = mode == "Auto Detect"
+
+        # Pre-flight, before any work: the no-CV2 backend cannot auto-detect, and
+        # letting it try means an upstream TypeError from inside
+        # estimate_grid_fft's caller instead of a message naming the fix. Guarded
+        # by `detected`, so Lightweight + a manual grid mode is untouched.
+        if detected and not _auto_detect_usable(upstream):
+            raise RuntimeError(
+                f"PixelGridRestore: backend={backend_label!r} cannot auto-detect on this install, so "
+                f"grid_mode='Auto Detect' would die inside upstream with a TypeError rather than falling "
+                f"back." + _LIGHTWEIGHT_WHY +
+                f" Either install OpenCV ({_INSTALL_HINT}) and leave backend='Auto' so it is picked "
+                f"automatically, or switch grid_mode to 'By Pixel Size' / 'By Grid Count' -- both skip "
+                f"detection entirely and work fine on this backend."
+            )
 
         imgs = _torch_image_to_uint8_bhwc(image)  # numpy uint8 [B,H,W,C]
         if imgs.ndim != 4 or imgs.shape[-1] not in (3, 4):
@@ -609,26 +1042,26 @@ class PixelGridRestore(io.ComfyNode):
             if i == 0:
                 first_width = width
 
-            grid_size = _resolve_grid_size(
-                grid_mode, int(pixel_size), int(grid_w), int(grid_h), width, height
-            )
+            grid_size = _resolve_grid_size(mode, params, width, height)
 
             try:
                 out_rgb, out_alpha = _pixelate(
                     upstream,
+                    backend_label,
                     rgb,
                     alpha,
                     sample_method=sample_method,
                     grid_size=grid_size,
-                    min_size=float(min_size),
-                    peak_width=int(peak_width),
+                    min_size=min_size,
+                    max_pixel_size=max_pixel_size,
+                    peak_width=peak_width,
                     refine_intensity=float(refine_intensity),
                     fix_square=bool(fix_square),
                 )
             except Exception as exc:  # noqa: BLE001 -- upstream leaks raw exceptions
                 raise RuntimeError(
                     f"PixelGridRestore: perfect-pixel raised {type(exc).__name__} on image {i} "
-                    f"({width}x{height}), backend={backend_label!r}, grid_mode={grid_mode!r}: {exc}."
+                    f"({width}x{height}), backend={backend_label!r}, grid_mode={mode!r}: {exc}."
                     + _backend_hint(backend_label, exc)
                 ) from exc
 
@@ -638,10 +1071,12 @@ class PixelGridRestore(io.ComfyNode):
             if out_rgb is None:
                 raise RuntimeError(
                     f"PixelGridRestore: 网格检测失败 (grid detection failed) on image {i} "
-                    f"({width}x{height}), backend={backend_label!r}, grid_mode={grid_mode!r}. "
+                    f"({width}x{height}), backend={backend_label!r}, grid_mode={mode!r}, "
+                    f"min_size={min_size}, max_pixel_size={max_pixel_size}. "
                     "上游 perfect-pixel 的自动检测（FFT + 梯度后备）在这张图上找不到网格，"
                     "它不会抛异常、只会原样返回输入图；为避免静默输出未像素化的原图，本节点在此报错。"
-                    "建议改用 grid_mode='By Pixel Size' 或 grid_mode='By Grid Count' 手动指定网格。"
+                    "建议改用 grid_mode='By Pixel Size' 或 grid_mode='By Grid Count' 手动指定网格；"
+                    "若方格边长明显大于 20px，请改 'Auto Detect' 的 max_pixel_size 后重试。"
                 )
 
             rgb_outs.append(out_rgb)
