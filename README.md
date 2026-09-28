@@ -2,11 +2,49 @@
 
 Turn AI-generated "fake pixel art" into **real** pixel art: detect (or force) the
 pixel grid, resample one colour per cell, optionally quantise to a shared
-palette, then export at a crisp integer scale. A separate two-node branch
-cleans animation frames and packs them into a game-ready sprite sheet.
+palette, then export at a crisp integer scale. A separate branch keys a batch's
+background out and packs the frames into a **game-ready sprite sheet** — straight
+from a generated video, if you like.
 
-Built on the **V3 node schema** (`comfy_api.latest`), so nodes are declared with
-`io.Schema` / `define_schema` rather than the legacy `INPUT_TYPES` dict.
+![Video to sprite sheet, end to end](docs/screenshots/workflow-sprite-sheet.png)
+
+*One generated clip through the whole pack: grid-restore the video, pick and apply
+one shared palette, remove the background, pack the frames.*
+
+- **Seven nodes, one category** (`image/pixel pipeline`): grid restore for stills
+  and video, palette extract/apply, export scale, background removal, sprite-sheet
+  packing.
+- **Strict on purpose.** A node that cannot do its job *loudly fails* instead of
+  silently passing the input through — no giant un-pixelated images saved by
+  accident.
+- **Deterministic.** Every k-means call is seeded; run the same workflow twice
+  and you get byte-identical output.
+- **V3 node schema** (`comfy_api.latest`), RGBA-aware end to end (Qwen-Image-2.1's
+  4-channel VAE included).
+
+## Install
+
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/PeaarLi/ComfyUI-PixelPipeline
+pip install -r ComfyUI-PixelPipeline/requirements.txt
+```
+
+ComfyUI Manager installs `requirements.txt` automatically.
+
+## Quick start
+
+**Stills:** `LoadImage` → `PixelGridRestore` → (`PixelPaletteExtract` →
+`PixelPaletteApply`) → `PixelExportScale` → `SaveImage`.
+
+**Sprite sheet:** `LoadImage` (or `LoadVideo` → `PixelVideoGridRestore`) →
+`PixelBackgroundRemove` → `PixelSpriteSheet` → `PreviewImage`. The `cell_width` /
+`cell_height` outputs are Unity's *Grid By Cell Size* values.
+
+The nodes live under **`图像 / 像素管线`** (`image/pixel pipeline`). If the
+library's type filter shows nothing, see
+[the frontend-bug note](#known-frontend-bug-the-inputoutput-type-filters-hide-every-custom-node) —
+typing `pixel` in the search box is the workaround.
 
 ## Status
 
@@ -86,16 +124,6 @@ On the video branch, `PixelVideoGridRestore` reads either RGBA frames or the
 separate `VideoComponents.alpha` slot. The restored mask is kept on `images`
 and in the rebuilt video's alpha slot. File encoding may still discard alpha;
 see [Video caveats](#video-caveats).
-
-## Install
-
-```bash
-cd ComfyUI/custom_nodes
-git clone <this repo>
-pip install -r ComfyUI-PixelPipeline/requirements.txt
-```
-
-ComfyUI Manager installs `requirements.txt` automatically.
 
 ## Finding the nodes in the node library
 
@@ -427,7 +455,9 @@ keeps the risk minimal: if upstream clarifies or changes its terms, the fix is a
 version bump here, not a redistribution problem.
 
 This package's own code — everything under `nodes/` and this repository's
-glue — is MIT licensed; see [`LICENSE`](LICENSE).
+glue — is licensed under the **GNU General Public License v3.0 or later**; see
+[`LICENSE`](LICENSE). That is the same licence as ComfyUI itself, and GPL-3.0 is
+compatible with the MIT terms the `perfect-pixel` dependency claims.
 
 ## Development
 
