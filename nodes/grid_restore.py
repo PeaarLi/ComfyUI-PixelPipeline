@@ -176,18 +176,19 @@ def _import_backend(backend: str):
         module = importlib.import_module(module_name)
     except ImportError as exc:
         raise RuntimeError(
-            f"PixelGridRestore: 无法导入后端 {backend!r} ({module_name})。"
-            f" 请先安装依赖: {_INSTALL_HINT}"
+            f"PixelGridRestore: cannot import backend {backend!r} ({module_name})."
+            f" Install the dependency first: {_INSTALL_HINT}"
         ) from exc
 
     wanted = _REQUIRED_UPSTREAM_OPS + _BACKEND_EXTRA_OPS.get(backend, ())
     missing = [name for name in wanted if not hasattr(module, name)]
     if missing:
         raise RuntimeError(
-            f"PixelGridRestore: 后端 {backend!r} ({module_name}) 缺少本节点需要的上游函数 "
-            f"{missing}。本包直接驱动 perfect-pixel 的检测/精修/采样步骤（因为需要拿到网格坐标"
-            f"才能让 alpha 与 RGB 严格对齐），因此依赖这些符号。多半是 perfect-pixel 升级后改名了；"
-            f"请检查已安装版本，或改用另一个 backend。"
+            f"PixelGridRestore: backend {backend!r} ({module_name}) is missing upstream functions "
+            f"this node needs: {missing}. The pack drives perfect-pixel's detect/refine/sample steps "
+            f"directly (it needs the grid coordinates to keep alpha and RGB exactly aligned), so it "
+            f"depends on those symbols. Most likely a perfect-pixel upgrade renamed them; check the "
+            f"installed version, or switch to the other backend."
         )
     return module
 
@@ -1070,13 +1071,14 @@ class PixelGridRestore(io.ComfyNode):
             # signal and emitted the untouched input.
             if out_rgb is None:
                 raise RuntimeError(
-                    f"PixelGridRestore: 网格检测失败 (grid detection failed) on image {i} "
+                    f"PixelGridRestore: grid detection failed on image {i} "
                     f"({width}x{height}), backend={backend_label!r}, grid_mode={mode!r}, "
                     f"min_size={min_size}, max_pixel_size={max_pixel_size}. "
-                    "上游 perfect-pixel 的自动检测（FFT + 梯度后备）在这张图上找不到网格，"
-                    "它不会抛异常、只会原样返回输入图；为避免静默输出未像素化的原图，本节点在此报错。"
-                    "建议改用 grid_mode='By Pixel Size' 或 grid_mode='By Grid Count' 手动指定网格；"
-                    "若方格边长明显大于 20px，请改 'Auto Detect' 的 max_pixel_size 后重试。"
+                    "Upstream perfect-pixel's auto detection (FFT + gradient fallback) found no grid "
+                    "in this image, and it never raises -- it just returns the input unchanged. This "
+                    "node raises here so an untouched, un-pixelated original is never silently emitted. "
+                    "Use grid_mode='By Pixel Size' or grid_mode='By Grid Count' to force a grid; if the "
+                    "cells look wider than 20px, raise 'Auto Detect's max_pixel_size and retry."
                 )
 
             rgb_outs.append(out_rgb)
@@ -1093,7 +1095,7 @@ class PixelGridRestore(io.ComfyNode):
         height_set = {gh for _, gh in grid_sizes}
         if len(width_set) != 1 or len(height_set) != 1:
             raise ValueError(
-                "PixelGridRestore: 批内网格尺寸不一致 (grid sizes differ across the batch): "
+                "PixelGridRestore: grid sizes differ across the batch: "
                 f"{sorted(grid_sizes)}. Please process images one-by-one or ensure the same input sizing."
             )
 

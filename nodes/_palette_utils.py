@@ -152,8 +152,8 @@ _INSTALL_HINT = 'pip install "perfect-pixel[opencv]"'
 def _require_cv2():
     if cv2 is None:
         raise RuntimeError(
-            "ComfyUI-PixelPipeline: 需要 OpenCV (cv2) 但当前环境没有安装。"
-            f" 请安装依赖: {_INSTALL_HINT}"
+            "ComfyUI-PixelPipeline: OpenCV (cv2) is required but not installed in this environment."
+            f" Install the dependency: {_INSTALL_HINT}"
         )
     return cv2
 
@@ -209,7 +209,7 @@ def _parse_hex_token(token: str, where: str,
         body = "".join(c * 2 for c in body)
     if len(body) != 6 or not all(c in _HEX_CHARS for c in body):
         raise ValueError(
-            f"{node_label}: {where} 无法解析为 HEX 颜色 (cannot parse as a HEX colour): "
+            f"{node_label}: {where} cannot be parsed as a HEX colour: "
             f"{token!r}. Expected #RRGGBB (or RRGGBB / #RGB), one colour per line or comma separated."
         )
     return int(body[0:2], 16), int(body[2:4], 16), int(body[4:6], 16)
@@ -236,7 +236,7 @@ def parse_palette_hex(text: str, node_label: str = "PixelPaletteApply") -> np.nd
         return np.zeros((0, 3), dtype=np.uint8)
     seen: dict[tuple[int, int, int], None] = {}
     for i, tok in enumerate(toks):
-        seen.setdefault(_parse_hex_token(tok, f"第 {i + 1} 个色标 (token {i + 1})", node_label))
+        seen.setdefault(_parse_hex_token(tok, f"colour token {i + 1}", node_label))
     return np.array(list(seen.keys()), dtype=np.uint8)
 
 

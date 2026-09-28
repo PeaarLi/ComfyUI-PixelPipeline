@@ -41,7 +41,7 @@ ComfyUI Manager installs `requirements.txt` automatically.
 `PixelBackgroundRemove` → `PixelSpriteSheet` → `PreviewImage`. The `cell_width` /
 `cell_height` outputs are Unity's *Grid By Cell Size* values.
 
-The nodes live under **`图像 / 像素管线`** (`image/pixel pipeline`). If the
+The nodes live under **`image/pixel pipeline`**. If the
 library's type filter shows nothing, see
 [the frontend-bug note](#known-frontend-bug-the-inputoutput-type-filters-hide-every-custom-node) —
 typing `pixel` in the search box is the workaround.
@@ -127,14 +127,14 @@ see [Video caveats](#video-caveats).
 
 ## Finding the nodes in the node library
 
-The seven nodes live under **`图像 / 像素管线`** (`image/pixel pipeline`). They also
+The seven nodes live under **`image/pixel pipeline`**. They also
 show up under the **Extensions** source group, because custom nodes are always
 classified by `python_module`, never by category — using a core-looking category
 does **not** fold a pack into the built-in "Comfy" group.
 
 ### Known frontend bug: the input/output type filters hide every custom node
 
-If you open the node library's **输入 / 输出** (input / output) filter and tick
+If you open the node library's **input / output** type filter and tick
 `IMAGE`, **none of these nodes will appear — and neither will any other custom
 node.** This is a bug in the frontend, not in this pack, and it cannot be worked
 around from inside a node package.

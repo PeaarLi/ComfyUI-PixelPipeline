@@ -127,6 +127,4 @@ python tools/verify_video.py <clip.mp4> --output _selftest_out/video_v2/check --
 ```
 
 The real-video verifier saves pre-encoding frames, a nearest-scaled preview,
-parameters, hashes, processing time and RSS measurements. See
-[the design and review criteria](VideoPipelineRedesignPlan.md) and
-[the implementation report](VideoPipelineV2Results.md).
+parameters, hashes, processing time and RSS measurements.
